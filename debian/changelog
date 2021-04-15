@@ -1,0 +1,79 @@
+google-guest-agent (20210414.00-0ubuntu1) hirsute; urgency=medium
+
+  * New upstream release (LP: #1924589)
+    - call restorecon on ssh host keys (#98)
+    - add ipv6 forwarded ip support (#101)
+    - add a match block to sshd_config for SAs (#99)
+    - Update error message for handleHealthCheckRequest. (#105)
+    - Add systemd-networkd.service restart dependency
+    - start sshd
+
+ -- Balint Reczey <rbalint@ubuntu.com>  Thu, 15 Apr 2021 18:18:15 +0200
+
+google-guest-agent (20201217.02-0ubuntu1) hirsute; urgency=medium
+
+  * New upstream release (LP: #1911448)
+  * debian/watch: Fix version handing in the download URL
+  * Update vendored files
+
+ -- Balint Reczey <rbalint@ubuntu.com>  Wed, 13 Jan 2021 19:13:59 +0100
+
+google-guest-agent (20200617.00-0ubuntu8) hirsute; urgency=medium
+
+  * debian/rules: Build the package as preferred by upstream
+    - Strip the binary
+    - Set main.version (LP: #1900897)
+  * Declare Breaks: on python3-google-compute-engine
+    to force conscious removal of the Python libraries that are not maintained
+    and this package make obsolete. (LP: #1905986)
+
+ -- Balint Reczey <rbalint@ubuntu.com>  Wed, 13 Jan 2021 13:24:40 +0100
+
+google-guest-agent (20200617.00-0ubuntu7) hirsute; urgency=medium
+
+  * No-change rebuild using new golang
+
+ -- Steve Langasek <steve.langasek@ubuntu.com>  Wed, 11 Nov 2020 22:16:15 +0000
+
+google-guest-agent (20200617.00-0ubuntu6) groovy; urgency=medium
+
+  * Import relevant patches from earlier gce-compute-image-packages package
+    (LP: #1901033)
+
+ -- Balint Reczey <rbalint@ubuntu.com>  Thu, 22 Oct 2020 17:29:37 +0200
+
+google-guest-agent (20200617.00-0ubuntu5) groovy; urgency=medium
+
+  * debian/rules: Don't stop or start google-startup-scripts and
+    google-shutdown-scripts services
+
+ -- Balint Reczey <rbalint@ubuntu.com>  Sat, 03 Oct 2020 00:47:33 +0200
+
+google-guest-agent (20200617.00-0ubuntu4) groovy; urgency=medium
+
+  * debian/gbp.conf: Use Ubuntu tags
+  * Don't ship /etc/default/instance_configs.cfg.
+    Also don't remove it when it exists according to upstream's request.
+  * debian/extra/vendor/*: Add vendored module sources
+  * debian/control: Drop unused Go build dependencies
+
+ -- Balint Reczey <rbalint@ubuntu.com>  Wed, 30 Sep 2020 15:01:51 +0200
+
+google-guest-agent (20200617.00-0ubuntu3) groovy; urgency=medium
+
+  * debian/copyright: Use "Google Inc" as copyright holder
+    instead of Google Cloud Platform
+
+ -- Balint Reczey <rbalint@ubuntu.com>  Tue, 25 Aug 2020 19:41:08 +0200
+
+google-guest-agent (20200617.00-0ubuntu2) groovy; urgency=medium
+
+  * Install /etc/default/instance_configs.cfg to the right path
+
+ -- Balint Reczey <rbalint@ubuntu.com>  Thu, 13 Aug 2020 23:51:12 +0200
+
+google-guest-agent (20200617.00-0ubuntu1) groovy; urgency=medium
+
+  * Initial release (LP: #1870314)
+
+ -- Balint Reczey <rbalint@ubuntu.com>  Thu, 23 Jul 2020 15:53:14 +0200
