@@ -1,3 +1,13 @@
+google-guest-agent (20210629.00-0ubuntu1) impish; urgency=medium
+
+  * New upstream version 20210629.00. (LP: #1938286)
+    - start sshd (#106).
+    - more granular service restarts (#111).
+    - systemd-notify in agentInit (#113).
+    - use IP for MDS (#115).
+
+ -- Utkarsh Gupta <utkarsh.gupta@canonical.com>  Wed, 28 Jul 2021 17:03:35 +0530
+
 google-guest-agent (20210414.00-0ubuntu1) hirsute; urgency=medium
 
   * New upstream release (LP: #1924589)
