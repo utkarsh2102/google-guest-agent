@@ -1,3 +1,9 @@
+google-guest-agent (20210629.00-0ubuntu1~20.04.0) focal; urgency=medium
+
+  * No-change rebuild for Focal. (LP: #1938286)
+
+ -- Utkarsh Gupta <utkarsh.gupta@canonical.com>  Thu, 02 Sep 2021 17:22:45 +0530
+
 google-guest-agent (20210629.00-0ubuntu1) impish; urgency=medium
 
   * New upstream version 20210629.00. (LP: #1938286)
