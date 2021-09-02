@@ -4,7 +4,7 @@ Uploaders: Balint Reczey <rbalint@ubuntu.com>
 Section: devel
 Testsuite: autopkgtest-pkg-go
 Priority: optional
-Build-Depends: debhelper-compat (= 12),
+Build-Depends: debhelper (>= 11),
                dh-golang,
                golang-any
 Standards-Version: 4.5.0
