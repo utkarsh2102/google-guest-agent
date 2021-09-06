@@ -1,3 +1,11 @@
+google-guest-agent (20210629.00-0ubuntu1~18.04.0) bionic; urgency=medium
+
+  * Rebuild for Bionic. (LP: #1938286)
+    - Lower dh-compat to 11.
+    - Use golang-1.13-go instead of golang-any.
+
+ -- Utkarsh Gupta <utkarsh.gupta@canonical.com>  Thu, 02 Sep 2021 17:35:03 +0530
+
 google-guest-agent (20210629.00-0ubuntu1) impish; urgency=medium
 
   * New upstream version 20210629.00. (LP: #1938286)
