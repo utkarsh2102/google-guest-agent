@@ -9,6 +9,10 @@ OUR_GOPATH := $(CURDIR)/.gopath
 export GOPATH := $(OUR_GOPATH)
 export GOCACHE := $(CURDIR)/.gocache
 
+# GO111MODULE needs to be set to "off" to avoid checking
+# modules information online.
+export GO111MODULE := off
+
 %:
 	dh $@ --builddirectory=_build --buildsystem=golang --with=golang
 
