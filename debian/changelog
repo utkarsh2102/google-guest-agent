@@ -1,3 +1,27 @@
+google-guest-agent (20220104.00-0ubuntu1) jammy; urgency=medium
+
+  * New upstream version 20220104.00. (LP: #1959392)
+    - Use IP address for calling the metadata server. (#116)
+    - Debug logging. (#122)
+    - Support enable-oslogin-sk key. (#120)
+    - New integ test. (#124)
+    - Restore line. (#127)
+    - Correct linux startup script order. (#135)
+    - Add WantedBy network dependencies to google-guest-agent
+      service. (#136) (LP: #1938299)
+    - Don't open ssh tempfile exclusively. (#137)
+    - Enable ipv6 on secondary interfaces (#133)
+    - Enforce script ordering. (#138)
+    - Handle comm errors in script runner. (#140)
+    - Integration test: test create and remove google user. (#128)
+    - Integration tests: instance setup. (#143)
+    - Don't duplicate logs. (#146)
+    - Add malformed ssh key unit test. (#142)
+    - Add or remove route integration test, utils. (#147)
+    - List IPv6 routes. (#150)
+
+ -- Utkarsh Gupta <utkarsh.gupta@canonical.com>  Fri, 28 Jan 2022 17:36:04 +0530
+
 google-guest-agent (20210629.00-0ubuntu1) impish; urgency=medium
 
   * New upstream version 20210629.00. (LP: #1938286)
