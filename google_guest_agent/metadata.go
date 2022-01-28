@@ -107,6 +107,7 @@ type attributes struct {
 	BlockProjectKeys      bool
 	EnableOSLogin         *bool
 	TwoFactor             *bool
+	SecurityKey           *bool
 	SSHKeys               []string
 	WindowsKeys           windowsKeys
 	Diagnostics           string
@@ -170,6 +171,7 @@ func (a *attributes) UnmarshalJSON(b []byte) error {
 		OldSSHKeys            string      `json:"sshKeys"`
 		SSHKeys               string      `json:"ssh-keys"`
 		TwoFactor             string      `json:"enable-oslogin-2fa"`
+		SecurityKey           string      `json:"enable-oslogin-sk"`
 		WindowsKeys           windowsKeys `json:"windows-keys"`
 		WSFCAddresses         string      `json:"wsfc-addrs"`
 		WSFCAgentPort         string      `json:"wsfc-agent-port"`
@@ -211,6 +213,10 @@ func (a *attributes) UnmarshalJSON(b []byte) error {
 	if err == nil {
 		a.TwoFactor = mkbool(value)
 	}
+	value, err = strconv.ParseBool(temp.SecurityKey)
+	if err == nil {
+		a.SecurityKey = mkbool(value)
+	}
 	// So SSHKeys will be nil instead of []string{}
 	if temp.SSHKeys != "" {
 		a.SSHKeys = strings.Split(temp.SSHKeys, "\n")
@@ -236,6 +242,7 @@ func watchMetadata(ctx context.Context) (*metadata, error) {
 }
 
 func getMetadata(ctx context.Context, hang bool) (*metadata, error) {
+	logger.Debugf("getMetadata, %t", hang)
 	client := &http.Client{
 		Timeout: defaultTimeout,
 	}
