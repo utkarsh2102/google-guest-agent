@@ -21,6 +21,7 @@ import (
 	"os/exec"
 	"runtime"
 	"strings"
+	"time"
 
 	"github.com/GoogleCloudPlatform/guest-logging-go/logger"
 )
@@ -35,7 +36,7 @@ type osloginMgr struct{}
 
 // We also read project keys first, letting instance-level keys take
 // precedence.
-func getOSLoginEnabled(md *metadata) (bool, bool) {
+func getOSLoginEnabled(md *metadata) (bool, bool, bool) {
 	var enable bool
 	if md.Project.Attributes.EnableOSLogin != nil {
 		enable = *md.Project.Attributes.EnableOSLogin
@@ -50,16 +51,24 @@ func getOSLoginEnabled(md *metadata) (bool, bool) {
 	if md.Instance.Attributes.TwoFactor != nil {
 		twofactor = *md.Instance.Attributes.TwoFactor
 	}
-	return enable, twofactor
+	var skey bool
+	if md.Project.Attributes.SecurityKey != nil {
+		skey = *md.Project.Attributes.SecurityKey
+	}
+	if md.Instance.Attributes.SecurityKey != nil {
+		skey = *md.Instance.Attributes.SecurityKey
+	}
+	return enable, twofactor, skey
 }
 
 func (o *osloginMgr) diff() bool {
-	oldEnable, oldTwoFactor := getOSLoginEnabled(oldMetadata)
-	enable, twofactor := getOSLoginEnabled(newMetadata)
+	oldEnable, oldTwoFactor, oldSkey := getOSLoginEnabled(oldMetadata)
+	enable, twofactor, skey := getOSLoginEnabled(newMetadata)
 	return oldMetadata.Project.ProjectID == "" ||
 		// True on first run or if any value has changed.
 		(oldTwoFactor != twofactor) ||
-		(oldEnable != enable)
+		(oldEnable != enable) ||
+		(oldSkey != skey)
 }
 
 func (o *osloginMgr) timeout() bool {
@@ -73,8 +82,8 @@ func (o *osloginMgr) disabled(os string) bool {
 func (o *osloginMgr) set() error {
 	// We need to know if it was previously enabled for the clearing of
 	// metadata-based SSH keys.
-	oldEnable, _ := getOSLoginEnabled(oldMetadata)
-	enable, twofactor := getOSLoginEnabled(newMetadata)
+	oldEnable, _, _ := getOSLoginEnabled(oldMetadata)
+	enable, twofactor, skey := getOSLoginEnabled(newMetadata)
 
 	if enable && !oldEnable {
 		logger.Infof("Enabling OS Login")
@@ -87,7 +96,7 @@ func (o *osloginMgr) set() error {
 		logger.Infof("Disabling OS Login")
 	}
 
-	if err := writeSSHConfig(enable, twofactor); err != nil {
+	if err := writeSSHConfig(enable, twofactor, skey); err != nil {
 		logger.Errorf("Error updating SSH config: %v.", err)
 	}
 
@@ -105,6 +114,7 @@ func (o *osloginMgr) set() error {
 
 	for _, svc := range []string{"nscd", "unscd", "systemd-logind", "cron", "crond"} {
 		// These services should be restarted if running
+		logger.Debugf("systemctl try-restart %s, if it exists", svc)
 		if err := systemctlTryRestart(svc); err != nil {
 			logger.Errorf("Error restarting service: %v.", err)
 		}
@@ -112,20 +122,27 @@ func (o *osloginMgr) set() error {
 
 	// SSH should be started if not running, reloaded otherwise.
 	for _, svc := range []string{"ssh", "sshd"} {
+		logger.Debugf("systemctl reload-or-restart %s, if it exists", svc)
 		if err := systemctlReloadOrRestart(svc); err != nil {
 			logger.Errorf("Error reloading service: %v.", err)
 		}
 	}
 
+	now := fmt.Sprintf("%d", time.Now().Unix())
+	writeGuestAttributes("guest-agent/sshable", now)
+
 	if enable {
+		logger.Debugf("Create OS Login dirs, if needed")
 		if err := createOSLoginDirs(); err != nil {
 			logger.Errorf("Error creating OS Login directory: %v.", err)
 		}
 
+		logger.Debugf("create OS Login sudoers config, if needed")
 		if err := createOSLoginSudoersFile(); err != nil {
 			logger.Errorf("Error creating OS Login sudoers file: %v.", err)
 		}
 
+		logger.Debugf("starting OS Login nss cache fill")
 		if err := runCmd(exec.Command("google_oslogin_nss_cache")); err != nil {
 			logger.Errorf("Error updating NSS cache: %v.", err)
 		}
@@ -157,6 +174,7 @@ func filterGoogleLines(contents string) []string {
 }
 
 func writeConfigFile(path, contents string) error {
+	logger.Debugf("writing %s", path)
 	file, err := os.OpenFile(path, os.O_WRONLY|os.O_TRUNC, 0777)
 	if err != nil {
 		return err
@@ -166,12 +184,18 @@ func writeConfigFile(path, contents string) error {
 	return nil
 }
 
-func updateSSHConfig(sshConfig string, enable, twofactor bool) string {
+func updateSSHConfig(sshConfig string, enable, twofactor, skey bool) string {
 	// TODO: this feels like a case for a text/template
 	challengeResponseEnable := "ChallengeResponseAuthentication yes"
 	authorizedKeysCommand := "AuthorizedKeysCommand /usr/bin/google_authorized_keys"
+	if skey {
+		authorizedKeysCommand = "AuthorizedKeysCommand /usr/bin/google_authorized_keys_sk"
+	}
 	if runtime.GOOS == "freebsd" {
 		authorizedKeysCommand = "AuthorizedKeysCommand /usr/local/bin/google_authorized_keys"
+		if skey {
+			authorizedKeysCommand = "AuthorizedKeysCommand /usr/local/bin/google_authorized_keys_sk"
+		}
 	}
 	authorizedKeysUser := "AuthorizedKeysCommandUser root"
 	twoFactorAuthMethods := "AuthenticationMethods publickey,keyboard-interactive"
@@ -199,12 +223,12 @@ func updateSSHConfig(sshConfig string, enable, twofactor bool) string {
 	return strings.Join(filtered, "\n")
 }
 
-func writeSSHConfig(enable, twofactor bool) error {
+func writeSSHConfig(enable, twofactor, skey bool) error {
 	sshConfig, err := ioutil.ReadFile("/etc/ssh/sshd_config")
 	if err != nil {
 		return err
 	}
-	proposed := updateSSHConfig(string(sshConfig), enable, twofactor)
+	proposed := updateSSHConfig(string(sshConfig), enable, twofactor, skey)
 	if proposed == string(sshConfig) {
 		return nil
 	}
@@ -351,17 +375,31 @@ func createOSLoginSudoersFile() error {
 // systemctlTryRestart tries to restart a systemd service if it is already
 // running. Stopped services will be ignored.
 func systemctlTryRestart(servicename string) error {
+	if !systemctlUnitExists(servicename) {
+		return nil
+	}
 	return runCmd(exec.Command("systemctl", "try-restart", servicename+".service"))
 }
 
 // systemctlReloadOrRestart tries to reload a running systemd service if
 // supported, restart otherwise. Stopped services will be started.
 func systemctlReloadOrRestart(servicename string) error {
+	if !systemctlUnitExists(servicename) {
+		return nil
+	}
 	return runCmd(exec.Command("systemctl", "reload-or-restart", servicename+".service"))
 }
 
 // systemctlStart tries to start a stopped systemd service. Started services
 // will be ignored.
 func systemctlStart(servicename string) error {
+	if !systemctlUnitExists(servicename) {
+		return nil
+	}
 	return runCmd(exec.Command("systemctl", "start", servicename+".service"))
+}
+
+func systemctlUnitExists(servicename string) bool {
+	res := runCmdOutput(exec.Command("systemctl", "list-units", "--all", servicename+".service"))
+	return !strings.Contains(res.Stdout(), "0 loaded units listed")
 }
