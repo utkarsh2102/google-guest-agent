@@ -1,4 +1,4 @@
-//  Copyright 2017 Google Inc. All Rights Reserved.
+//  Copyright 2022 Google LLC
 //
 //  Licensed under the Apache License, Version 2.0 (the "License");
 //  you may not use this file except in compliance with the License.
@@ -25,6 +25,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/GoogleCloudPlatform/guest-agent/utils"
 	"github.com/GoogleCloudPlatform/guest-logging-go/logger"
 )
 
@@ -87,13 +88,13 @@ func getForwardsFromRegistry(mac string) ([]string, error) {
 
 func compareRoutes(configuredRoutes, desiredRoutes []string) (toAdd, toRm []string) {
 	for _, desiredRoute := range desiredRoutes {
-		if !containsString(desiredRoute, configuredRoutes) {
+		if !utils.ContainsString(desiredRoute, configuredRoutes) {
 			toAdd = append(toAdd, desiredRoute)
 		}
 	}
 
 	for _, configuredRoute := range configuredRoutes {
-		if !containsString(configuredRoute, desiredRoutes) {
+		if !utils.ContainsString(configuredRoute, desiredRoutes) {
 			toRm = append(toRm, configuredRoute)
 		}
 	}
@@ -220,7 +221,7 @@ func (a *addressMgr) applyWSFCFilter() {
 		for idx := range interfaces {
 			var filteredForwardedIps []string
 			for _, ip := range interfaces[idx].ForwardedIps {
-				if !containsString(ip, wsfcAddrs) {
+				if !utils.ContainsString(ip, wsfcAddrs) {
 					filteredForwardedIps = append(filteredForwardedIps, ip)
 				}
 			}
@@ -228,7 +229,7 @@ func (a *addressMgr) applyWSFCFilter() {
 
 			var filteredTargetInstanceIps []string
 			for _, ip := range interfaces[idx].TargetInstanceIps {
-				if !containsString(ip, wsfcAddrs) {
+				if !utils.ContainsString(ip, wsfcAddrs) {
 					filteredTargetInstanceIps = append(filteredTargetInstanceIps, ip)
 				}
 			}
@@ -319,7 +320,7 @@ func (a *addressMgr) set() error {
 	for _, ni := range newMetadata.Instance.NetworkInterfaces {
 		iface, err := getInterfaceByMAC(ni.Mac)
 		if err != nil {
-			if !containsString(ni.Mac, badMAC) {
+			if !utils.ContainsString(ni.Mac, badMAC) {
 				logger.Errorf("Error getting interface: %s", err)
 				badMAC = append(badMAC, ni.Mac)
 			}
@@ -352,7 +353,7 @@ func (a *addressMgr) set() error {
 			}
 			for _, ip := range configuredIPs {
 				// Only add to `forwardedIPs` if it is recorded in the registry.
-				if containsString(ip, regFwdIPs) {
+				if utils.ContainsString(ip, regFwdIPs) {
 					forwardedIPs = append(forwardedIPs, ip)
 				}
 			}
@@ -395,14 +396,14 @@ func (a *addressMgr) set() error {
 		var registryEntries []string
 		for _, ip := range wantIPs {
 			// If the IP is not in toAdd, add to registry list and continue.
-			if !containsString(ip, toAdd) {
+			if !utils.ContainsString(ip, toAdd) {
 				registryEntries = append(registryEntries, ip)
 				continue
 			}
 			var err error
 			if runtime.GOOS == "windows" {
 				// Don't addAddress if this is already configured.
-				if !containsString(ip, configuredIPs) {
+				if !utils.ContainsString(ip, configuredIPs) {
 					err = addAddress(net.ParseIP(ip), net.IPv4Mask(255, 255, 255, 255), uint32(iface.Index))
 				}
 			} else {
@@ -418,7 +419,7 @@ func (a *addressMgr) set() error {
 		for _, ip := range toRm {
 			var err error
 			if runtime.GOOS == "windows" {
-				if !containsString(ip, configuredIPs) {
+				if !utils.ContainsString(ip, configuredIPs) {
 					continue
 				}
 				err = removeAddress(net.ParseIP(ip), uint32(iface.Index))
@@ -442,7 +443,7 @@ func (a *addressMgr) set() error {
 	return nil
 }
 
-// Enables or disables IPv6 on the primary interface.
+// Enables or disables IPv6 on network interfaces.
 func configureIPv6() error {
 	var newNi, oldNi networkInterfaces
 	if len(newMetadata.Instance.NetworkInterfaces) == 0 {
@@ -511,7 +512,7 @@ func enableNetworkInterfaces() error {
 	for _, ni := range newMetadata.Instance.NetworkInterfaces[1:] {
 		iface, err := getInterfaceByMAC(ni.Mac)
 		if err != nil {
-			if !containsString(ni.Mac, badMAC) {
+			if !utils.ContainsString(ni.Mac, badMAC) {
 				logger.Errorf("Error getting interface: %s", err)
 				badMAC = append(badMAC, ni.Mac)
 			}
@@ -527,7 +528,7 @@ func enableNetworkInterfaces() error {
 		}
 		iface, err := getInterfaceByMAC(ni.Mac)
 		if err != nil {
-			if !containsString(ni.Mac, badMAC) {
+			if !utils.ContainsString(ni.Mac, badMAC) {
 				logger.Errorf("Error getting interface: %s", err)
 				badMAC = append(badMAC, ni.Mac)
 			}
@@ -560,6 +561,13 @@ func enableNetworkInterfaces() error {
 
 		if len(googleIpv6Interfaces) == 0 {
 			return nil
+		}
+		for _, iface := range googleIpv6Interfaces {
+			// Enable kernel to accept to route advertisements.
+			val := fmt.Sprintf("net.ipv6.conf.%s.accept_ra_rt_info_max_plen=128", iface)
+			if err := runCmd(exec.Command("sysctl", val)); err != nil {
+				return err
+			}
 		}
 
 		var dhclientArgs6 []string
