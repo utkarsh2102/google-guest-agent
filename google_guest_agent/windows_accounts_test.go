@@ -95,7 +95,10 @@ func TestAccountsDisabled(t *testing.T) {
 	}
 }
 
-func TestNewPwd(t *testing.T) {
+// rename this with leading disabled because this is a resource
+// intensive test. this test takes approx. 141 seconds to complete, next
+// longest test is 0.43 seconds.
+func disabledTestNewPwd(t *testing.T) {
 	minPasswordLength := 15
 	maxPasswordLength := 255
 	var tests = []struct {
@@ -213,32 +216,136 @@ func TestCompareAccounts(t *testing.T) {
 	}
 }
 
-func TestRemoveExpiredKeys(t *testing.T) {
+func TestGetUserKeys(t *testing.T) {
 	var tests = []struct {
-		key   string
-		valid bool
+		key           string
+		expectedValid int
 	}{
-		{`user:ssh-rsa [KEY] google-ssh {"userName":"user@email.com", "expireOn":"2028-11-08T19:30:47+0000"}`, true},
-		{`user:ssh-rsa [KEY] google-ssh {"userName":"user@email.com", "expireOn":"2028-11-08T19:30:47+0700"}`, true},
-		{`user:ssh-rsa [KEY] google-ssh {"userName":"user@email.com", "expireOn":"2028-11-08T19:30:47+0700", "futureField": "UNUSED_FIELDS_IGNORED"}`, true},
-		{`user:ssh-rsa [KEY] google-ssh {"userName":"user@email.com", "expireOn":"2018-11-08T19:30:46+0000"}`, false},
-		{`user:ssh-rsa [KEY] google-ssh {"userName":"user@email.com", "expireOn":"2018-11-08T19:30:46+0700"}`, false},
-		{`user:ssh-rsa [KEY] google-ssh {"userName":"user@email.com", "expireOn":"INVALID_TIMESTAMP"}`, false},
-		{`user:ssh-rsa [KEY] google-ssh`, false},
-		{`user:ssh-rsa [KEY] user`, true},
-		{`user:ssh-rsa [KEY]`, true},
-		{},
+		{`user:ssh-rsa [KEY] google-ssh {"userName":"user@email.com", "expireOn":"2028-11-08T19:30:47+0000"}`,
+			1,
+		},
+		{`user:ssh-rsa [KEY] google-ssh {"userName":"user@email.com", "expireOn":"2028-11-08T19:30:47+0700"}`,
+			1,
+		},
+		{`user:ssh-rsa [KEY] google-ssh {"userName":"user@email.com", "expireOn":"2028-11-08T19:30:47+0700", "futureField": "UNUSED_FIELDS_IGNORED"}`,
+			1,
+		},
+		{`user:ssh-rsa [KEY] google-ssh {"userName":"user@email.com", "expireOn":"2018-11-08T19:30:46+0000"}`,
+			0,
+		},
+		{`user:ssh-rsa [KEY] google-ssh {"userName":"user@email.com", "expireOn":"2018-11-08T19:30:46+0700"}`,
+			0,
+		},
+		{`user:ssh-rsa [KEY] google-ssh {"userName":"user@email.com", "expireOn":"INVALID_TIMESTAMP"}`,
+			0,
+		},
+		{`user:ssh-rsa [KEY] google-ssh`,
+			0,
+		},
+		{`user:ssh-rsa [KEY] user`,
+			1,
+		},
+		{`user:ssh-rsa [KEY]`,
+			1,
+		},
+		{`malformed-ssh-keys [KEY] google-ssh`,
+			0,
+		},
+		{`:malformed-ssh-keys [KEY] google-ssh`,
+			0,
+		},
 	}
 
 	for _, tt := range tests {
-		ret := removeExpiredKeys([]string{tt.key})
-		if tt.valid {
-			if len(ret) == 0 || ret[0] != tt.key {
-				t.Errorf("valid key was removed: %q", tt.key)
-			}
+		ret := getUserKeys([]string{tt.key})
+		if userKeys, _ := ret["user"]; len(userKeys) != tt.expectedValid {
+			t.Errorf("expected %d valid keys from getUserKeys, but %d", tt.expectedValid, len(userKeys))
 		}
-		if !tt.valid && len(ret) == 1 {
-			t.Errorf("invalid key was kept: %q", tt.key)
+	}
+}
+
+func TestVersionOk(t *testing.T) {
+	tests := []struct {
+		version    versionInfo
+		minVersion versionInfo
+		hasErr     bool
+	}{
+		{
+			version:    versionInfo{8, 6},
+			minVersion: versionInfo{8, 6},
+			hasErr:     false,
+		},
+		{
+			version:    versionInfo{9, 3},
+			minVersion: versionInfo{8, 6},
+			hasErr:     false,
+		},
+		{
+			version:    versionInfo{8, 3},
+			minVersion: versionInfo{8, 6},
+			hasErr:     true,
+		},
+		{
+			version:    versionInfo{7, 9},
+			minVersion: versionInfo{8, 6},
+			hasErr:     true,
+		},
+	}
+
+	for _, tt := range tests {
+		err := versionOk(tt.version, tt.minVersion)
+		hasErr := err != nil
+		if hasErr != tt.hasErr {
+			t.Errorf("versionOk error not correct: Got: %v, Want: %v for Version %d.%d with Min Version of %d.%d",
+				hasErr, tt.hasErr, tt.version.major, tt.version.minor, tt.minVersion.major, tt.minVersion.minor)
+		}
+	}
+}
+
+func TestParseVersionInfo(t *testing.T) {
+	tests := []struct {
+		psOutput    []byte
+		expectedVer versionInfo
+		expectErr   bool
+	}{
+		{
+			psOutput:    []byte("8.6.0.0\r\n"),
+			expectedVer: versionInfo{8, 6},
+			expectErr:   false,
+		},
+		{
+			psOutput:    []byte("8.6.0.0"),
+			expectedVer: versionInfo{8, 6},
+			expectErr:   false,
+		},
+		{
+			psOutput:    []byte("8.6\r\n"),
+			expectedVer: versionInfo{8, 6},
+			expectErr:   false,
+		},
+		{
+			psOutput:    []byte("12345.34567.34566.3463456\r\n"),
+			expectedVer: versionInfo{12345, 34567},
+			expectErr:   false,
+		},
+		{
+			psOutput:    []byte("8\r\n"),
+			expectedVer: versionInfo{0, 0},
+			expectErr:   true,
+		},
+		{
+			psOutput:    []byte("\r\n"),
+			expectedVer: versionInfo{0, 0},
+			expectErr:   true,
+		},
+	}
+
+	for _, tt := range tests {
+		verInfo, err := parseVersionInfo(tt.psOutput)
+		hasErr := err != nil
+		if verInfo != tt.expectedVer || hasErr != tt.expectErr {
+			t.Errorf("parseVersionInfo(%v) not correct: Got: %v, Error: %v, Want: %v, Error: %v",
+				tt.psOutput, verInfo, hasErr, tt.expectedVer, tt.expectErr)
 		}
 	}
 }

@@ -17,7 +17,6 @@ package main
 import (
 	"bufio"
 	"bytes"
-	"encoding/json"
 	"fmt"
 	"io/ioutil"
 	"os"
@@ -26,8 +25,8 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"time"
 
+	"github.com/GoogleCloudPlatform/guest-agent/utils"
 	"github.com/GoogleCloudPlatform/guest-logging-go/logger"
 )
 
@@ -73,13 +72,13 @@ func (a *accountsMgr) diff() bool {
 
 	// If any on-disk keys have expired.
 	for _, keys := range sshKeys {
-		if len(keys) != len(removeExpiredKeys(keys)) {
+		if len(keys) != len(getUserKeys(keys)) {
 			return true
 		}
 	}
 	// If we've just disabled OS Login.
-	oldOslogin, _ := getOSLoginEnabled(oldMetadata)
-	newOslogin, _ := getOSLoginEnabled(newMetadata)
+	oldOslogin, _, _ := getOSLoginEnabled(oldMetadata)
+	newOslogin, _, _ := getOSLoginEnabled(newMetadata)
 	if oldOslogin && !newOslogin {
 		return true
 	}
@@ -92,7 +91,7 @@ func (a *accountsMgr) timeout() bool {
 }
 
 func (a *accountsMgr) disabled(os string) bool {
-	oslogin, _ := getOSLoginEnabled(newMetadata)
+	oslogin, _, _ := getOSLoginEnabled(newMetadata)
 	return false ||
 		os == "windows" || oslogin ||
 		!config.Section("Daemons").Key("accounts_daemon").MustBool(true)
@@ -100,12 +99,15 @@ func (a *accountsMgr) disabled(os string) bool {
 
 func (a *accountsMgr) set() error {
 	if sshKeys == nil {
+		logger.Debugf("initialize sshKeys map")
 		sshKeys = make(map[string][]string)
 	}
 
+	logger.Debugf("create sudoers file if needed")
 	if err := createSudoersFile(); err != nil {
 		logger.Errorf("Error creating google-sudoers file: %v.", err)
 	}
+	logger.Debugf("create sudoers group if needed")
 	if err := createSudoersGroup(); err != nil {
 		logger.Errorf("Error creating google-sudoers group: %v.", err)
 	}
@@ -115,25 +117,13 @@ func (a *accountsMgr) set() error {
 		mdkeys = append(mdkeys, newMetadata.Project.Attributes.SSHKeys...)
 	}
 
-	mdKeyMap := make(map[string][]string)
-	for _, key := range removeExpiredKeys(mdkeys) {
-		idx := strings.Index(key, ":")
-		if idx == -1 {
-			continue
-		}
-		user := key[:idx]
-		if user == "" {
-			continue
-		}
-		userKeys := mdKeyMap[user]
-		userKeys = append(userKeys, key[idx+1:])
-		mdKeyMap[user] = userKeys
-	}
+	mdKeyMap := getUserKeys(mdkeys)
 
+	logger.Debugf("read google users file")
 	gUsers, err := readGoogleUsersFile()
 	if err != nil {
 		// TODO: is this OK to continue past?
-		logger.Errorf("Couldn't read google users file: %v.", err)
+		logger.Errorf("Couldn't read google_users file: %v.", err)
 	}
 
 	// Update SSH keys, creating Google users as needed.
@@ -175,6 +165,7 @@ func (a *accountsMgr) set() error {
 	}
 
 	// Update the google_users file if we've added or removed any users.
+	logger.Debugf("write google_users file")
 	if err := writeGoogleUsersFile(); err != nil {
 		logger.Errorf("Error writing google_users file: %v.", err)
 	}
@@ -188,6 +179,36 @@ func (a *accountsMgr) set() error {
 	}
 
 	return nil
+}
+
+var badSSHKeys []string
+
+// getUserKeys returns the keys which are not expired and non-expiring key.
+// valid formats are:
+// user:ssh-rsa [KEY_VALUE] [USERNAME]
+// user:ssh-rsa [KEY_VALUE]
+// user:ssh-rsa [KEY_VALUE] google-ssh {"userName":"[USERNAME]","expireOn":"[EXPIRE_TIME]"}
+func getUserKeys(mdkeys []string) map[string][]string {
+	mdKeyMap := make(map[string][]string)
+	for i := 0; i < len(mdkeys); i++ {
+		trimmedKey := strings.Trim(mdkeys[i], " ")
+		if trimmedKey != "" {
+			user, keyVal, err := utils.GetUserKey(trimmedKey)
+			if err != nil {
+				if !utils.ContainsString(trimmedKey, badSSHKeys) {
+					logger.Errorf("%s: %s", err.Error(), trimmedKey)
+					badSSHKeys = append(badSSHKeys, trimmedKey)
+				}
+				continue
+			}
+
+			// key which is not expired or non-expiring key, add it.
+			userKeys := mdKeyMap[user]
+			userKeys = append(userKeys, keyVal)
+			mdKeyMap[user] = userKeys
+		}
+	}
+	return mdKeyMap
 }
 
 // passwdEntry is a user.User with omitted passwd fields restored.
@@ -289,57 +310,6 @@ func readGoogleUsersFile() (map[string]string, error) {
 	return res, nil
 }
 
-type linuxKey windowsKey
-
-// expired returns true if the key's expireOn field is in the past, false otherwise.
-func (k linuxKey) expired() bool {
-	t, err := time.Parse("2006-01-02T15:04:05-0700", k.ExpireOn)
-	if err != nil {
-		if !containsString(k.ExpireOn, badExpire) {
-			logger.Errorf("Error parsing time: %v.", err)
-			badExpire = append(badExpire, k.ExpireOn)
-		}
-		return true
-	}
-	return t.Before(time.Now())
-}
-
-// removeExpiredKeys returns the provided list of keys with expired keys removed.
-// valid formats are:
-// ssh-rsa [KEY_VALUE] [USERNAME]
-// ssh-rsa [KEY_VALUE]
-// ssh-rsa [KEY_VALUE] google-ssh {"userName":"[USERNAME]","expireOn":"[EXPIRE_TIME]"}
-//
-// see: https://cloud.google.com/compute/docs/instances/adding-removing-ssh-keys#sshkeyformat
-func removeExpiredKeys(keys []string) []string {
-	var res []string
-	for i := 0; i < len(keys); i++ {
-		key := strings.Trim(keys[i], " ")
-		if key == "" {
-			continue
-		}
-		fields := strings.SplitN(key, " ", 4)
-		if len(fields) < 3 || fields[2] != "google-ssh" {
-			// non-expiring key, add it.
-			res = append(res, key)
-			continue
-		}
-		if len(fields) < 4 {
-			// expiring key without expiration format.
-			continue
-		}
-		lkey := linuxKey{}
-		if err := json.Unmarshal([]byte(fields[3]), &lkey); err != nil {
-			// invalid expiration format.
-			continue
-		}
-		if !lkey.expired() {
-			res = append(res, key)
-		}
-	}
-	return res
-}
-
 // Replaces {user} or {group} in command string. Supports legacy python-era
 // user command overrides.
 func createUserGroupCmd(cmd, user, group string) *exec.Cmd {
@@ -383,7 +353,6 @@ func removeGoogleUser(user string) error {
 	}
 	gpasswddel := config.Section("Accounts").Key("gpasswd_remove_cmd").MustString("gpasswd -d {user} {group}")
 	return runCmd(createUserGroupCmd(gpasswddel, user, "google-sudoers"))
-
 }
 
 // createSudoersFile creates the google_sudoers configuration file if it does
@@ -479,7 +448,7 @@ func updateAuthorizedKeysFile(user string, keys []string) error {
 		userKeys = append(userKeys, key)
 	}
 
-	newfile, err := os.OpenFile(tempPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
+	newfile, err := os.OpenFile(tempPath, os.O_WRONLY|os.O_CREATE, 0600)
 	if err != nil {
 		return err
 	}

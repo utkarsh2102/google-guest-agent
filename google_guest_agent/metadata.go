@@ -25,6 +25,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/GoogleCloudPlatform/guest-agent/utils"
 	"github.com/GoogleCloudPlatform/guest-logging-go/logger"
 )
 
@@ -106,7 +107,9 @@ type project struct {
 type attributes struct {
 	BlockProjectKeys      bool
 	EnableOSLogin         *bool
+	EnableWindowsSSH      *bool
 	TwoFactor             *bool
+	SecurityKey           *bool
 	SSHKeys               []string
 	WindowsKeys           windowsKeys
 	Diagnostics           string
@@ -139,7 +142,7 @@ func (k *windowsKeys) UnmarshalJSON(b []byte) error {
 	for _, jskey := range strings.Split(s, "\n") {
 		var wk windowsKey
 		if err := json.Unmarshal([]byte(jskey), &wk); err != nil {
-			if !containsString(jskey, badKeys) {
+			if !utils.ContainsString(jskey, badKeys) {
 				logger.Errorf("failed to unmarshal windows key from metadata: %s", err)
 				badKeys = append(badKeys, jskey)
 			}
@@ -166,10 +169,12 @@ func (a *attributes) UnmarshalJSON(b []byte) error {
 		DisableAddressManager string      `json:"disable-address-manager"`
 		EnableDiagnostics     string      `json:"enable-diagnostics"`
 		EnableOSLogin         string      `json:"enable-oslogin"`
+		EnableWindowsSSH      string      `json:"enable-windows-ssh"`
 		EnableWSFC            string      `json:"enable-wsfc"`
 		OldSSHKeys            string      `json:"sshKeys"`
 		SSHKeys               string      `json:"ssh-keys"`
 		TwoFactor             string      `json:"enable-oslogin-2fa"`
+		SecurityKey           string      `json:"enable-oslogin-sk"`
 		WindowsKeys           windowsKeys `json:"windows-keys"`
 		WSFCAddresses         string      `json:"wsfc-addrs"`
 		WSFCAgentPort         string      `json:"wsfc-agent-port"`
@@ -203,6 +208,10 @@ func (a *attributes) UnmarshalJSON(b []byte) error {
 	if err == nil {
 		a.EnableOSLogin = mkbool(value)
 	}
+	value, err = strconv.ParseBool(temp.EnableWindowsSSH)
+	if err == nil {
+		a.EnableWindowsSSH = mkbool(value)
+	}
 	value, err = strconv.ParseBool(temp.EnableWSFC)
 	if err == nil {
 		a.EnableWSFC = mkbool(value)
@@ -210,6 +219,10 @@ func (a *attributes) UnmarshalJSON(b []byte) error {
 	value, err = strconv.ParseBool(temp.TwoFactor)
 	if err == nil {
 		a.TwoFactor = mkbool(value)
+	}
+	value, err = strconv.ParseBool(temp.SecurityKey)
+	if err == nil {
+		a.SecurityKey = mkbool(value)
 	}
 	// So SSHKeys will be nil instead of []string{}
 	if temp.SSHKeys != "" {
@@ -236,6 +249,7 @@ func watchMetadata(ctx context.Context) (*metadata, error) {
 }
 
 func getMetadata(ctx context.Context, hang bool) (*metadata, error) {
+	logger.Debugf("getMetadata, %t", hang)
 	client := &http.Client{
 		Timeout: defaultTimeout,
 	}
