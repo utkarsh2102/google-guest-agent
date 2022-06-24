@@ -38,15 +38,15 @@ import (
 	"time"
 
 	"cloud.google.com/go/storage"
+	"github.com/GoogleCloudPlatform/guest-agent/utils"
 	"github.com/GoogleCloudPlatform/guest-logging-go/logger"
 	"github.com/go-ini/ini"
-	"github.com/tarm/serial"
 )
 
 var (
 	programName    = "GCEMetadataScripts"
 	version        = "dev"
-	metadataURL    = "http://metadata.google.internal/computeMetadata/v1"
+	metadataURL    = "http://169.254.169.254/computeMetadata/v1"
 	metadataHang   = "/?recursive=true&alt=json&timeout_sec=10&last_etag=NONE"
 	defaultTimeout = 20 * time.Second
 	powerShellArgs = []string{"-NoProfile", "-NoLogo", "-ExecutionPolicy", "Unrestricted", "-File"}
@@ -239,37 +239,22 @@ func getMetadata(key string, recurse bool) ([]byte, error) {
 	return md, nil
 }
 
-// runScript makes a temporary directory and temporary file for the script, downloads and then runs it.
-func runScript(ctx context.Context, key, value string) error {
-	var u *url.URL
-	if strings.HasSuffix(key, "-url") {
-		var err error
-		u, err = url.Parse(strings.TrimSpace(value))
-		if err != nil {
-			return err
-		}
-	}
-
-	// Make temp directory.
-	dir, err := ioutil.TempDir(config.Section("MetadataScripts").Key("run_dir").String(), "metadata-scripts")
-	if err != nil {
-		return err
-	}
-	defer os.RemoveAll(dir)
-
-	// These extensions need to be present on Windows. Doesn't hurt to add
-	// on other systems though.
-	tmpFile := filepath.Join(dir, key)
-	for _, ext := range []string{"bat", "cmd", "ps1"} {
-		if strings.HasSuffix(key, "-"+ext) || (u != nil && strings.HasSuffix(u.Path, "."+ext)) {
-			tmpFile = fmt.Sprintf("%s.%s", tmpFile, ext)
+func normalizeFilePathForWindows(filePath string, metadataKey string, gcsScriptURL *url.URL) string {
+	// If either the metadataKey ends in one of these extensions OR if this is a url startup script and if the
+	// url path ends in one of these extensions, append the extension to the filePath name so that Windows can recognize it.
+	for _, ext := range []string{"bat", "cmd", "ps1", "exe"} {
+		if strings.HasSuffix(metadataKey, "-"+ext) || (gcsScriptURL != nil && strings.HasSuffix(gcsScriptURL.Path, "."+ext)) {
+			filePath = fmt.Sprintf("%s.%s", filePath, ext)
 			break
 		}
 	}
+	return filePath
+}
 
+func writeScriptToFile(ctx context.Context, value string, filePath string, gcsScriptURL *url.URL) error {
 	// Create or download files.
-	if u != nil {
-		file, err := os.OpenFile(tmpFile, os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0755)
+	if gcsScriptURL != nil {
+		file, err := os.OpenFile(filePath, os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0755)
 		if err != nil {
 			return fmt.Errorf("error opening temp file: %v", err)
 		}
@@ -283,24 +268,54 @@ func runScript(ctx context.Context, key, value string) error {
 	} else {
 		// Trim leading spaces and newlines.
 		value = strings.TrimLeft(value, " \n\v\f\t\r")
-		if err := ioutil.WriteFile(tmpFile, []byte(value), 0755); err != nil {
+		if err := ioutil.WriteFile(filePath, []byte(value), 0755); err != nil {
 			return fmt.Errorf("error writing temp file: %v", err)
 		}
 	}
 
-	// Craft the command to run.
-	var c *exec.Cmd
-	if strings.HasSuffix(tmpFile, ".ps1") {
-		c = exec.Command("powershell.exe", append(powerShellArgs, tmpFile)...)
-	} else {
-		if runtime.GOOS == "windows" {
-			c = exec.Command(tmpFile)
-		} else {
-			c = exec.Command(config.Section("MetadataScripts").Key("default_shell").MustString("/bin/bash"), "-c", tmpFile)
+	return nil
+}
+
+func setupAndRunScript(ctx context.Context, metadataKey string, value string) error {
+	// Make sure that the URL is valid for URL startup scripts
+	var gcsScriptURL *url.URL
+	if strings.HasSuffix(metadataKey, "-url") {
+		var err error
+		gcsScriptURL, err = url.Parse(strings.TrimSpace(value))
+		if err != nil {
+			return err
 		}
 	}
 
-	return runCmd(c, key)
+	// Make temp directory.
+	tmpDir, err := ioutil.TempDir(config.Section("MetadataScripts").Key("run_dir").String(), "metadata-scripts")
+	if err != nil {
+		return err
+	}
+	defer os.RemoveAll(tmpDir)
+
+	tmpFile := filepath.Join(tmpDir, metadataKey)
+	if runtime.GOOS == "windows" {
+		tmpFile = normalizeFilePathForWindows(tmpFile, metadataKey, gcsScriptURL)
+	}
+	writeScriptToFile(ctx, value, tmpFile, gcsScriptURL)
+
+	return runScript(tmpFile, metadataKey)
+}
+
+// Craft the command to run.
+func runScript(filePath string, metadataKey string) error {
+	var cmd *exec.Cmd
+	if strings.HasSuffix(filePath, ".ps1") {
+		cmd = exec.Command("powershell.exe", append(powerShellArgs, filePath)...)
+	} else {
+		if runtime.GOOS == "windows" {
+			cmd = exec.Command(filePath)
+		} else {
+			cmd = exec.Command(config.Section("MetadataScripts").Key("default_shell").MustString("/bin/bash"), "-c", filePath)
+		}
+	}
+	return runCmd(cmd, metadataKey)
 }
 
 func runCmd(c *exec.Cmd, name string) error {
@@ -319,13 +334,20 @@ func runCmd(c *exec.Cmd, name string) error {
 	pw.Close()
 
 	in := bufio.NewScanner(pr)
-	for in.Scan() {
+	for {
+		if !in.Scan() {
+			if err := in.Err(); err != nil {
+				logger.Errorf("error while communicating with %q script: %v", name, err)
+			}
+			break
+		}
 		logger.Log(logger.LogEntry{
 			Message:   fmt.Sprintf("%s: %s", name, in.Text()),
 			CallDepth: 3,
 			Severity:  logger.Info,
 		})
 	}
+	pr.Close()
 
 	return c.Wait()
 }
@@ -351,19 +373,17 @@ func getWantedKeys(args []string, os string) ([]string, error) {
 	}
 
 	var mdkeys []string
-	suffixes := []string{"url"}
+	var suffixes []string
 	if os == "windows" {
-		// This ordering matters. URL is last on Windows, first otherwise.
 		suffixes = []string{"ps1", "cmd", "bat", "url"}
+	} else {
+		suffixes = []string{"url"}
+		// The 'bare' startup-script or shutdown-script key, not supported on Windows.
+		mdkeys = append(mdkeys, fmt.Sprintf("%s-script", prefix))
 	}
 
 	for _, suffix := range suffixes {
 		mdkeys = append(mdkeys, fmt.Sprintf("%s-script-%s", prefix, suffix))
-	}
-
-	// The 'bare' startup-script or shutdown-script key, not supported on Windows.
-	if os != "windows" {
-		mdkeys = append(mdkeys, fmt.Sprintf("%s-script", prefix))
 	}
 
 	return mdkeys, nil
@@ -395,23 +415,9 @@ func getExistingKeys(wanted []string) (map[string]string, error) {
 	return nil, nil
 }
 
-type serialPort struct {
-	port string
-}
-
-func (s *serialPort) Write(b []byte) (int, error) {
-	c := &serial.Config{Name: s.port, Baud: 115200}
-	p, err := serial.OpenPort(c)
-	if err != nil {
-		return 0, err
-	}
-	defer p.Close()
-
-	return p.Write(b)
-}
-
-func logFormat(e logger.LogEntry) string {
+func logFormatWindows(e logger.LogEntry) string {
 	now := time.Now().Format("2006/01/02 15:04:05")
+	// 2006/01/02 15:04:05 GCEMetadataScripts This is a log message.
 	return fmt.Sprintf("%s %s: %s", now, programName, e.Message)
 }
 
@@ -427,15 +433,18 @@ func parseConfig(file string) (*ini.File, error) {
 func main() {
 	ctx := context.Background()
 
-	opts := logger.LogOpts{
-		LoggerName:     programName,
-		FormatFunction: logFormat,
-	}
+	opts := logger.LogOpts{LoggerName: programName}
 
 	cfgfile := configPath
 	if runtime.GOOS == "windows" {
 		cfgfile = winConfigPath
-		opts.Writers = []io.Writer{&serialPort{"COM1"}, os.Stdout}
+		opts.Writers = []io.Writer{&utils.SerialPort{Port: "COM1"}, os.Stdout}
+		opts.FormatFunction = logFormatWindows
+	} else {
+		opts.Writers = []io.Writer{os.Stdout}
+		opts.FormatFunction = func(e logger.LogEntry) string { return e.Message }
+		// Local logging is syslog; we will just use stdout in Linux.
+		opts.DisableLocalLogging = true
 	}
 
 	var err error
@@ -470,13 +479,17 @@ func main() {
 		return
 	}
 
-	for key, value := range scripts {
-		logger.Infof("Found %s in metadata.", key)
-		if err := runScript(ctx, key, value); err != nil {
-			logger.Infof("%s %s", key, err)
+	for _, wantedKey := range wantedKeys {
+		value, ok := scripts[wantedKey]
+		if !ok {
 			continue
 		}
-		logger.Infof("%s exit status 0", key)
+		logger.Infof("Found %s in metadata.", wantedKey)
+		if err := setupAndRunScript(ctx, wantedKey, value); err != nil {
+			logger.Infof("%s %s", wantedKey, err)
+			continue
+		}
+		logger.Infof("%s exit status 0", wantedKey)
 	}
 
 	logger.Infof("Finished running %s scripts.", os.Args[1])

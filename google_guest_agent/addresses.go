@@ -1,4 +1,4 @@
-//  Copyright 2017 Google Inc. All Rights Reserved.
+//  Copyright 2022 Google LLC
 //
 //  Licensed under the Apache License, Version 2.0 (the "License");
 //  you may not use this file except in compliance with the License.
@@ -25,6 +25,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/GoogleCloudPlatform/guest-agent/utils"
 	"github.com/GoogleCloudPlatform/guest-logging-go/logger"
 )
 
@@ -87,13 +88,13 @@ func getForwardsFromRegistry(mac string) ([]string, error) {
 
 func compareRoutes(configuredRoutes, desiredRoutes []string) (toAdd, toRm []string) {
 	for _, desiredRoute := range desiredRoutes {
-		if !containsString(desiredRoute, configuredRoutes) {
+		if !utils.ContainsString(desiredRoute, configuredRoutes) {
 			toAdd = append(toAdd, desiredRoute)
 		}
 	}
 
 	for _, configuredRoute := range configuredRoutes {
-		if !containsString(configuredRoute, desiredRoutes) {
+		if !utils.ContainsString(configuredRoute, desiredRoutes) {
 			toRm = append(toRm, configuredRoute)
 		}
 	}
@@ -141,6 +142,21 @@ func getLocalRoutes(ifname string) ([]string, error) {
 	var res []string
 	for _, line := range strings.Split(out.Stdout(), "\n") {
 		line = strings.TrimPrefix(line, "local ")
+		line = strings.TrimSpace(line)
+		if line != "" {
+			res = append(res, line)
+		}
+	}
+
+	// and again for IPv6 routes, without 'scope host' which is IPv4 only
+	args = fmt.Sprintf("-6 route list table local type local dev %s proto %s", ifname, protoID)
+	out = runCmdOutput(exec.Command("ip", strings.Split(args, " ")...))
+	if out.ExitCode() != 0 {
+		return nil, error(out)
+	}
+	for _, line := range strings.Split(out.Stdout(), "\n") {
+		line = strings.TrimPrefix(line, "local ")
+		line = strings.Split(line, " ")[0]
 		line = strings.TrimSpace(line)
 		if line != "" {
 			res = append(res, line)
@@ -205,7 +221,7 @@ func (a *addressMgr) applyWSFCFilter() {
 		for idx := range interfaces {
 			var filteredForwardedIps []string
 			for _, ip := range interfaces[idx].ForwardedIps {
-				if !containsString(ip, wsfcAddrs) {
+				if !utils.ContainsString(ip, wsfcAddrs) {
 					filteredForwardedIps = append(filteredForwardedIps, ip)
 				}
 			}
@@ -213,7 +229,7 @@ func (a *addressMgr) applyWSFCFilter() {
 
 			var filteredTargetInstanceIps []string
 			for _, ip := range interfaces[idx].TargetInstanceIps {
-				if !containsString(ip, wsfcAddrs) {
+				if !utils.ContainsString(ip, wsfcAddrs) {
 					filteredTargetInstanceIps = append(filteredTargetInstanceIps, ip)
 				}
 			}
@@ -279,6 +295,7 @@ func (a *addressMgr) set() error {
 
 	if config.Section("NetworkInterfaces").Key("setup").MustBool(true) {
 		if runtime.GOOS != "windows" {
+			logger.Debugf("Configure IPv6")
 			if err := configureIPv6(); err != nil {
 				// Continue through IPv6 configuration errors.
 				logger.Errorf("Error configuring IPv6: %v", err)
@@ -286,6 +303,7 @@ func (a *addressMgr) set() error {
 		}
 
 		if runtime.GOOS != "windows" && !interfacesEnabled {
+			logger.Debugf("Enable network interfaces")
 			if err := enableNetworkInterfaces(); err != nil {
 				return err
 			}
@@ -297,11 +315,12 @@ func (a *addressMgr) set() error {
 		return nil
 	}
 
+	logger.Debugf("Add routes for aliases, forwarded IP and target-instance IPs")
 	// Add routes for IP aliases, forwarded and target-instance IPs.
 	for _, ni := range newMetadata.Instance.NetworkInterfaces {
 		iface, err := getInterfaceByMAC(ni.Mac)
 		if err != nil {
-			if !containsString(ni.Mac, badMAC) {
+			if !utils.ContainsString(ni.Mac, badMAC) {
 				logger.Errorf("Error getting interface: %s", err)
 				badMAC = append(badMAC, ni.Mac)
 			}
@@ -334,7 +353,7 @@ func (a *addressMgr) set() error {
 			}
 			for _, ip := range configuredIPs {
 				// Only add to `forwardedIPs` if it is recorded in the registry.
-				if containsString(ip, regFwdIPs) {
+				if utils.ContainsString(ip, regFwdIPs) {
 					forwardedIPs = append(forwardedIPs, ip)
 				}
 			}
@@ -377,14 +396,14 @@ func (a *addressMgr) set() error {
 		var registryEntries []string
 		for _, ip := range wantIPs {
 			// If the IP is not in toAdd, add to registry list and continue.
-			if !containsString(ip, toAdd) {
+			if !utils.ContainsString(ip, toAdd) {
 				registryEntries = append(registryEntries, ip)
 				continue
 			}
 			var err error
 			if runtime.GOOS == "windows" {
 				// Don't addAddress if this is already configured.
-				if !containsString(ip, configuredIPs) {
+				if !utils.ContainsString(ip, configuredIPs) {
 					err = addAddress(net.ParseIP(ip), net.IPv4Mask(255, 255, 255, 255), uint32(iface.Index))
 				}
 			} else {
@@ -400,7 +419,7 @@ func (a *addressMgr) set() error {
 		for _, ip := range toRm {
 			var err error
 			if runtime.GOOS == "windows" {
-				if !containsString(ip, configuredIPs) {
+				if !utils.ContainsString(ip, configuredIPs) {
 					continue
 				}
 				err = removeAddress(net.ParseIP(ip), uint32(iface.Index))
@@ -424,11 +443,11 @@ func (a *addressMgr) set() error {
 	return nil
 }
 
-// Enables or disables IPv6 on the primary interface.
+// Enables or disables IPv6 on network interfaces.
 func configureIPv6() error {
 	var newNi, oldNi networkInterfaces
 	if len(newMetadata.Instance.NetworkInterfaces) == 0 {
-		return fmt.Errorf("No interfaces found in metadata")
+		return fmt.Errorf("no interfaces found in metadata")
 	}
 	newNi = newMetadata.Instance.NetworkInterfaces[0]
 	if len(oldMetadata.Instance.NetworkInterfaces) > 0 {
@@ -479,7 +498,8 @@ func configureIPv6() error {
 	return nil
 }
 
-// enableNetworkInterfaces runs `dhclient eth1 eth2 ... ethN`.
+// enableNetworkInterfaces runs `dhclient eth1 eth2 ... ethN`
+// and `dhclient -6 eth1 eth2 ... ethN`.
 // On RHEL7, it also calls disableNM for each interface.
 // On SLES, it calls enableSLESInterfaces instead of dhclient.
 func enableNetworkInterfaces() error {
@@ -492,13 +512,29 @@ func enableNetworkInterfaces() error {
 	for _, ni := range newMetadata.Instance.NetworkInterfaces[1:] {
 		iface, err := getInterfaceByMAC(ni.Mac)
 		if err != nil {
-			if !containsString(ni.Mac, badMAC) {
+			if !utils.ContainsString(ni.Mac, badMAC) {
 				logger.Errorf("Error getting interface: %s", err)
 				badMAC = append(badMAC, ni.Mac)
 			}
 			continue
 		}
 		googleInterfaces = append(googleInterfaces, iface.Name)
+	}
+	var googleIpv6Interfaces []string
+	for _, ni := range newMetadata.Instance.NetworkInterfaces[1:] {
+		if ni.DHCPv6Refresh == "" {
+			// This interface is not IPv6 enabled
+			continue
+		}
+		iface, err := getInterfaceByMAC(ni.Mac)
+		if err != nil {
+			if !utils.ContainsString(ni.Mac, badMAC) {
+				logger.Errorf("Error getting interface: %s", err)
+				badMAC = append(badMAC, ni.Mac)
+			}
+			continue
+		}
+		googleIpv6Interfaces = append(googleIpv6Interfaces, iface.Name)
 	}
 
 	switch {
@@ -518,13 +554,25 @@ func enableNetworkInterfaces() error {
 			return runCmd(exec.Command(dhcpCommand))
 		}
 
-		dhclientArgs := []string{}
-		// The dhclient_script key has historically only been supported on EL6.
-		if (osRelease.os == "rhel" || osRelease.os == "centos") && osRelease.version.major == 6 {
-			dhclientArgs = append(dhclientArgs, "-sf", config.Section("NetworkInterfaces").Key("dhclient_script").MustString("/sbin/google-dhclient-script"))
+		// Try IPv4 first as it's higher priority.
+		if err := runCmd(exec.Command("dhclient", googleInterfaces...)); err != nil {
+			return err
 		}
-		dhclientArgs = append(dhclientArgs, googleInterfaces...)
-		return runCmd(exec.Command("dhclient", dhclientArgs...))
+
+		if len(googleIpv6Interfaces) == 0 {
+			return nil
+		}
+		for _, iface := range googleIpv6Interfaces {
+			// Enable kernel to accept to route advertisements.
+			val := fmt.Sprintf("net.ipv6.conf.%s.accept_ra_rt_info_max_plen=128", iface)
+			if err := runCmd(exec.Command("sysctl", val)); err != nil {
+				return err
+			}
+		}
+
+		var dhclientArgs6 []string
+		dhclientArgs6 = append([]string{"-6"}, googleIpv6Interfaces...)
+		return runCmd(exec.Command("dhclient", dhclientArgs6...))
 	}
 }
 
@@ -534,6 +582,8 @@ func enableSLESInterfaces(interfaces []string) error {
 	var err error
 	var priority = 10100
 	for _, iface := range interfaces {
+		logger.Debugf("write enabling ifcfg-%s config", iface)
+
 		var ifcfg *os.File
 		ifcfg, err = os.Create("/etc/sysconfig/network/ifcfg-" + iface)
 		if err != nil {
@@ -543,6 +593,7 @@ func enableSLESInterfaces(interfaces []string) error {
 		contents := []string{
 			googleComment,
 			"STARTMODE=hotplug",
+			// NOTE: 'dhcp' is the dhcp4+dhcp6 option.
 			"BOOTPROTO=dhcp",
 			fmt.Sprintf("DHCLIENT_ROUTE_PRIORITY=%d", priority),
 		}
@@ -558,6 +609,7 @@ func enableSLESInterfaces(interfaces []string) error {
 
 // disableNM writes an ifcfg file with DHCP and NetworkManager disabled.
 func disableNM(iface string) error {
+	logger.Debugf("write disabling ifcfg-%s config", iface)
 	filename := "/etc/sysconfig/network-scripts/ifcfg-" + iface
 	ifcfg, err := os.OpenFile(filename, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0644)
 	if err == nil {
