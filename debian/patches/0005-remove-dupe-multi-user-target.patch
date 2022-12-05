@@ -1,5 +1,10 @@
-From: Chloé 'kajiya' Smith <chloe.smith@canonical.com>
-Subject: Remove duplicate ``multi-user.target``
+Description: Remove duplicate ``multi-user.target``
+Author: Chloé 'kajiya' Smith <chloe.smith@canonical.com>
+Origin: vendor
+Bug-Ubuntu: https://bugs.launchpad.net/ubuntu/+source/google-guest-agent/+bug/1998864
+Forwarded: not-needed
+Last-Updated: 2022-12-05
+
 --- a/google-startup-scripts.service
 +++ b/google-startup-scripts.service
 @@ -3,7 +3,7 @@
