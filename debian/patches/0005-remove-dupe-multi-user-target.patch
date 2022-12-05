@@ -1,0 +1,13 @@
+From: Chloé 'kajiya' Smith <chloe.smith@canonical.com>
+Subject: Remove duplicate ``multi-user.target``
+--- a/google-startup-scripts.service
++++ b/google-startup-scripts.service
+@@ -3,7 +3,7 @@
+ Wants=network-online.target rsyslog.service
+ After=network-online.target rsyslog.service google-guest-agent.service
+ Before=apt-daily.service
+-After=cloud-final.service multi-user.target
++After=cloud-final.servicer
+ Wants=cloud-final.service
+ After=snapd.seeded.service
+ Wants=snapd.seeded.service
