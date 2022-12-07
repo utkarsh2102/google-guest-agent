@@ -12,7 +12,7 @@ Last-Updated: 2022-12-05
  After=network-online.target rsyslog.service google-guest-agent.service
  Before=apt-daily.service
 -After=cloud-final.service multi-user.target
-+After=cloud-final.servicer
++After=cloud-final.service
  Wants=cloud-final.service
  After=snapd.seeded.service
  Wants=snapd.seeded.service
