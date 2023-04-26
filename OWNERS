@@ -2,12 +2,12 @@
 # See the OWNERS docs at https://go.k8s.io/owners
 
 approvers:
-  - adjackura
-  - hopkiw
-  - zmarano
   - bkatyl
-reviewers:
-  - adjackura
-  - hopkiw
+  - chaitanyakulkarni28
+  - dorileo
+  - jjerger
+  - karnvadaliya
+  - koln67
+  - quintonamore
+  - vorakl
   - zmarano
-  - bkatyl
