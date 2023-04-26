@@ -1,3 +1,49 @@
+google-guest-agent (20230330.00-0ubuntu1) lunar; urgency=high
+
+  * New upstream version 20230330.00. (LP: #2016593)
+    - correct expired key handling (#175)
+    - Expired key tests (#176)
+    - add members to OWNERS (#178)
+    - Workload certs (#177)
+    - Workload certificate refresh (#182)
+    - update workload_cert permissions (#180)
+    - write workload cert status file (#184)
+    - add workload cert refresh to preset (#185)
+    - Updates to gce-workload-cert-refresh (#186)
+    - Fix typo with wsfc agent (#189)
+    - Validate user key for whitespace chars (#188)
+    - Windows: retry adding MDS route (#194)
+    - Updating logging module so cloud logs are flushed prior to exit
+      (#196)
+    - Update owners file (#199)
+    - Update OWNERS (#201)
+    - Allow a comment part of a pub ssh key to have an arbitrary format
+      (#198)
+  * d/extra/vendor: Update vendored dependencies.
+
+ -- Utkarsh Gupta <utkarsh.gupta@canonical.com>  Tue, 11 Apr 2023 20:17:10 +0530
+
+google-guest-agent (20220622.00-0ubuntu5) lunar; urgency=medium
+
+  * d/p/0005-make-service-directive-explicit.patch: restructure directives
+    so services run in the correct order. (LP: #2004606)
+
+ -- Chloé 'kajiya' Smith <chloe.smith@canonical.com>  Fri, 03 Feb 2023 00:14:03 +0000
+
+google-guest-agent (20220622.00-0ubuntu4) lunar; urgency=medium
+
+  * d/p/0005-remove-dupe-multi-user-target.patch: fix breaking typo
+    in the service file. (LP: #1998864)
+
+ -- Chloé 'kajiya' Smith <chloe.smith@canonical.com>  Thu, 08 Dec 2022 7:19:31 +0000
+
+google-guest-agent (20220622.00-0ubuntu3) lunar; urgency=medium
+
+  * d/p/0005-remove-dupe-multi-user-target.patch: Add patch to
+    fix duplicate `multi-user.target` entries. (LP: #1998864)
+
+ -- Chloé 'kajiya' Smith <chloe.smith@canonical.com>  Mon, 05 Dec 2022 19:52:50 +0000
+
 google-guest-agent (20220622.00-0ubuntu2~18.04.0) bionic; urgency=medium
 
   * Rebuild for Bionic.

@@ -22,7 +22,9 @@ import (
 	"os"
 	"time"
 
+	"cloud.google.com/go/compute/metadata"
 	"cloud.google.com/go/logging"
+	"google.golang.org/api/option"
 )
 
 var (
@@ -48,7 +50,13 @@ type LogOpts struct {
 	// FormatFunction will produce the string representation of each log event.
 	FormatFunction func(LogEntry) string
 	// Additional writers that will be used during logging.
-	Writers []io.Writer
+	Writers   []io.Writer
+	UserAgent string
+}
+
+// SetDebugLogging enables or disables debug level logging.
+func SetDebugLogging(enabled bool) {
+	debugEnabled = enabled
 }
 
 // Init instantiates the logger.
@@ -68,17 +76,31 @@ func Init(ctx context.Context, opts LogOpts) error {
 		}
 	}
 
-	if !opts.DisableCloudLogging || opts.ProjectName == "" {
+	if !opts.DisableCloudLogging && opts.ProjectName != "" {
 		var err error
-		cloudLoggingClient, err = logging.NewClient(ctx, opts.ProjectName)
+		cOpts := []option.ClientOption{}
+		if opts.UserAgent != "" {
+			cOpts = append(cOpts, option.WithUserAgent(opts.UserAgent))
+		}
+		cloudLoggingClient, err = logging.NewClient(ctx, opts.ProjectName, cOpts...)
 		if err != nil {
 			Errorf("Continuing without cloud logging due to error in initialization: %v", err.Error())
 			// Log but don't return this error, as it doesn't prevent continuing.
 			return nil
 		}
 
-		// This automatically detects and associates with a GCE resource.
-		cloudLogger = cloudLoggingClient.Logger(loggerName)
+		// Override default error handler. Must be a func and not nil.
+		cloudLoggingClient.OnError = func(e error) { return }
+
+		// The logger automatically detects and associates with a GCE
+		// resource. However instance_name is not included in this
+		// resource, so add an instance_name label to all log Entries.
+		name, err := metadata.InstanceName()
+		if err == nil {
+			cloudLogger = cloudLoggingClient.Logger(loggerName, logging.CommonLabels(map[string]string{"instance_name": name}))
+		} else {
+			cloudLogger = cloudLoggingClient.Logger(loggerName)
+		}
 
 		go func() {
 			for {
@@ -94,6 +116,7 @@ func Init(ctx context.Context, opts LogOpts) error {
 // Close closes the logger.
 func Close() {
 	if cloudLoggingClient != nil {
+		cloudLogger.Flush()
 		cloudLoggingClient.Close()
 	}
 	localClose()
@@ -116,6 +139,12 @@ func Log(e LogEntry) {
 
 	var cloudSev logging.Severity
 	if cloudLogger != nil {
+		var payload interface{}
+		if e.StructuredPayload != nil {
+			payload = e.StructuredPayload
+		} else {
+			payload = e
+		}
 		switch e.Severity {
 		case Debug:
 			cloudSev = logging.Debug
@@ -130,7 +159,7 @@ func Log(e LogEntry) {
 		default:
 			cloudSev = logging.Default
 		}
-		cloudLogger.Log(logging.Entry{Severity: cloudSev, SourceLocation: e.Source, Payload: e, Labels: e.Labels})
+		cloudLogger.Log(logging.Entry{Severity: cloudSev, SourceLocation: e.Source, Payload: payload, Labels: e.Labels})
 	}
 }
 
