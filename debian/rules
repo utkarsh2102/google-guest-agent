@@ -1,8 +1,8 @@
 #!/usr/bin/make -f
 
-# use Go 1.13 as golang-any defaults to Go 1.10, which
+# use Go 1.18 as golang-any defaults to Go 1.10, which
 # doesn't have new features needed by this package.
-export PATH := /usr/lib/go-1.13/bin:$(PATH)
+export PATH := /usr/lib/go-1.18/bin:$(PATH)
 
 # temporary build path; needed by newer Go.
 OUR_GOPATH := $(CURDIR)/.gopath
