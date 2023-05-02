@@ -1,3 +1,14 @@
+google-guest-agent (20230426.00-0ubuntu1) mantic; urgency=medium
+
+  * New upstream version 20230426.00. (LP: #2018272)
+    - update mod: update golang.org/x/net to 0.7.0 and its
+      dependencies.
+    - Fix compilation directives.
+  * d/extra/vendor: Update vendored dependencies.
+    (Fixes: CVE-2022-41723)
+
+ -- Utkarsh Gupta <utkarsh@ubuntu.com>  Tue, 02 May 2023 08:51:38 +0200
+
 google-guest-agent (20230330.00-0ubuntu1~20.04.0) focal; urgency=medium
 
   * No-change rebuild for Focal. (LP: #2016593)
