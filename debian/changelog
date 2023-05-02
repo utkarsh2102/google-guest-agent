@@ -1,3 +1,9 @@
+google-guest-agent (20230426.00-0ubuntu1~23.04.0) lunar; urgency=medium
+
+  * No-change rebuild for Lunar.
+
+ -- Utkarsh Gupta <utkarsh@ubuntu.com>  Tue, 02 May 2023 09:58:54 +0200
+
 google-guest-agent (20230426.00-0ubuntu1) mantic; urgency=medium
 
   * New upstream version 20230426.00. (LP: #2018272)
