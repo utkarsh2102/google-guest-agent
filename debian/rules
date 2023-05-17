@@ -17,7 +17,7 @@ override_dh_auto_install:
 
 override_dh_installsystemd:
 	dh_installsystemd google-guest-agent.service
-	dh_installsystemd --no-start --no-restart-after-upgrade google-startup-scripts.service google-shutdown-scripts.service
+	dh_installsystemd --no-start --no-restart-after-upgrade --no-stop-on-upgrade google-startup-scripts.service google-shutdown-scripts.service
 
 override_dh_clean:
 	dh_clean vendor/
