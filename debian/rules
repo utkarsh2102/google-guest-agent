@@ -16,7 +16,7 @@ export DH_GOLANG_BUILDPKG := github.com/GoogleCloudPlatform/guest-agent/google_g
 export GO111MODULE := off
 
 %:
-	dh $@ --builddirectory=_build --buildsystem=golang --with=golang
+	dh $@ --builddirectory=_build --buildsystem=golang --with=golang,systemd
 
 override_dh_auto_configure:
 	cp -r debian/extra/vendor ./
