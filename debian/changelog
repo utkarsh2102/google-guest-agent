@@ -1,3 +1,9 @@
+google-guest-agent (20230426.00-0ubuntu2~20.04.0) focal; urgency=medium
+
+  * No-change rebuild for Focal.
+
+ -- Utkarsh Gupta <utkarsh@ubuntu.com>  Thu, 25 May 2023 13:16:13 +0530
+
 google-guest-agent (20230426.00-0ubuntu2) mantic; urgency=medium
 
   * d/rules: Add --no-stop-on-upgrade for upgrade path
