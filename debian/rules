@@ -1,6 +1,6 @@
 #!/usr/bin/make -f
 
-export DH_GOLANG_BUILDPKG := github.com/GoogleCloudPlatform/guest-agent/google_guest_agent github.com/GoogleCloudPlatform/guest-agent/google_metadata_script_runner
+export DH_GOLANG_BUILDPKG := github.com/GoogleCloudPlatform/guest-agent/google_guest_agent github.com/GoogleCloudPlatform/guest-agent/google_metadata_script_runner github.com/GoogleCloudPlatform/guest-agent/gce_workload_cert_refresh
 
 # use Go 1.18 as golang-any defaults to Go 1.13, which
 # doesn't have new features needed by this package.
@@ -26,7 +26,8 @@ override_dh_auto_install:
 
 override_dh_installsystemd:
 	dh_installsystemd google-guest-agent.service
-	dh_installsystemd --no-start --no-restart-after-upgrade google-startup-scripts.service google-shutdown-scripts.service
+	dh_installsystemd gce-workload-cert-refresh.timer
+	dh_installsystemd --no-start --no-restart-after-upgrade --no-stop-on-upgrade google-startup-scripts.service google-shutdown-scripts.service gce-workload-cert-refresh.timer
 
 override_dh_clean:
 	dh_clean vendor/
