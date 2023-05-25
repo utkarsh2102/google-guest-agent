@@ -1,1 +1,2 @@
 *.service lib/systemd/system
+*.timer lib/systemd/system
