@@ -1,3 +1,13 @@
+google-guest-agent (20230426.00-0ubuntu2) mantic; urgency=medium
+
+  * d/rules: Add --no-stop-on-upgrade for upgrade path
+    to enforce no stop of the services on package upgrade.
+    This has the desired side-effect of not stopping, starting or
+    restarting the services as a part of the upgrade (LP: #2019089)
+  * d/{rules,install}: ship gce-workload-cert-refresh.timer.
+
+ -- Utkarsh Gupta <utkarsh@ubuntu.com>  Tue, 16 May 2023 11:11:11 +0530
+
 google-guest-agent (20230426.00-0ubuntu1~22.10.0) kinetic; urgency=medium
 
   * No-change rebuild for Kinetic.
