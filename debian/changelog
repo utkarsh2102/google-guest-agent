@@ -1,9 +1,9 @@
-google-guest-agent (20230426.00-0ubuntu2~16.04.0) UNRELEASED; urgency=medium
+google-guest-agent (20230426.00-0ubuntu2~16.04.0) xenial; urgency=medium
 
   * No-change rebuild for Xenial
-  * FIXME: backport go-1.18 and make it B-D on them. :|
+  * B-D on golang-1.18-go.
 
- -- Utkarsh Gupta <utkarsh@debian.org>  Thu, 25 May 2023 13:30:31 +0530
+ -- Utkarsh Gupta <utkarsh@ubuntu.com>  Fri, 02 Jun 2023 08:09:13 +0530
 
 google-guest-agent (20230426.00-0ubuntu2~18.04.0) bionic; urgency=medium
 
