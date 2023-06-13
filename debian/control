@@ -17,6 +17,7 @@ XS-Go-Import-Path: github.com/GoogleCloudPlatform/guest-agent
 
 Package: google-guest-agent
 Architecture: any
+Pre-Depends: gga-prerm-hack (= 0.1)
 Depends: ${misc:Depends},
          ${shlibs:Depends}
 Built-Using: ${misc:Built-Using}
