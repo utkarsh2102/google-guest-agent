@@ -14,6 +14,7 @@ on Windows and Linux GCE VMs in order to enable GCE platform features.
     * [Network](#network)
     * [Windows Failover Cluster Support](#windows-failover-cluster-support)
     * [Instance Setup](#instance-setup)
+    * [Telemetry](#telemetry)
 * [Metadata Scripts](#metadata-scripts)
 * [Configuration](#configuration)
 * [Packaging](#packaging)
@@ -133,6 +134,18 @@ The guest agent will perform some actions one time only, on the first VM boot:
 *   Generate SSH host keys.
 *   Create the `boto` config for using Google Cloud Storage.
 
+#### Telemetry
+
+The guest agent will record some basic system telemetry information at start and
+then once every 24 hours. 
+
+*   Guest agent version and architecture
+*   Operating system name and version
+*   Operating system kernel release and version
+
+Telemetry can be disabled by setting the metadata key `disable-guest-telemetry`
+to `true`.
+
 ## Metadata Scripts
 
 Metadata scripts implement support for running user provided
@@ -196,6 +209,7 @@ MetadataScripts   | shutdown               | `false` disables shutdown script ex
 NetworkInterfaces | setup                  | `false` skips network interface setup.
 NetworkInterfaces | ip\_forwarding         | `false` skips IP forwarding.
 NetworkInterfaces | dhcp\_command          | String path for alternate dhcp executable used to enable network interfaces.
+OSLogin           | cert_authentication    | `false` prevents guest-agent from setting up sshd's `TrustedUserCAKeys`, `AuthorizedPrincipalsCommand` and `AuthorizedPrincipalsCommandUser` configuration keys. Default value: `true`.
 
 Setting `network_enabled` to `false` will disable generating host keys and the
 `boto` config in the guest.

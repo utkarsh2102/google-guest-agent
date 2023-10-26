@@ -1,21 +1,22 @@
-//  Copyright 2017 Google Inc. All Rights Reserved.
-//
-//  Licensed under the Apache License, Version 2.0 (the "License");
-//  you may not use this file except in compliance with the License.
-//  You may obtain a copy of the License at
-//
-//      http://www.apache.org/licenses/LICENSE-2.0
-//
-//  Unless required by applicable law or agreed to in writing, software
-//  distributed under the License is distributed on an "AS IS" BASIS,
-//  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-//  See the License for the specific language governing permissions and
-//  limitations under the License.
+// Copyright 2017 Google LLC
+
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+
+//     https://www.apache.org/licenses/LICENSE-2.0
+
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
 package main
 
 import (
 	"bytes"
+	"context"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/sha1"
@@ -27,9 +28,12 @@ import (
 	"hash"
 	"math/big"
 	"reflect"
+	"runtime"
 	"strconv"
 	"strings"
 
+	"github.com/GoogleCloudPlatform/guest-agent/google_guest_agent/cfg"
+	"github.com/GoogleCloudPlatform/guest-agent/metadata"
 	"github.com/GoogleCloudPlatform/guest-agent/utils"
 	"github.com/GoogleCloudPlatform/guest-logging-go/logger"
 )
@@ -112,21 +116,7 @@ func printCreds(creds *credsJSON) error {
 	return err
 }
 
-var badExpire []string
-
-func (k windowsKey) expired() bool {
-	expired, err := utils.CheckExpired(k.ExpireOn)
-	if err != nil {
-		if !utils.ContainsString(k.ExpireOn, badExpire) {
-			logger.Errorf("error parsing time: %s", err)
-			badExpire = append(badExpire, k.ExpireOn)
-		}
-		return true
-	}
-	return expired
-}
-
-func (k windowsKey) createOrResetPwd() (*credsJSON, error) {
+func createOrResetPwd(ctx context.Context, k metadata.WindowsKey) (*credsJSON, error) {
 	pwd, err := newPwd(k.PasswordLength)
 	if err != nil {
 		return nil, fmt.Errorf("error creating password: %v", err)
@@ -136,18 +126,18 @@ func (k windowsKey) createOrResetPwd() (*credsJSON, error) {
 		if err := resetPwd(k.UserName, pwd); err != nil {
 			return nil, fmt.Errorf("error running resetPwd: %v", err)
 		}
-		if k.AddToAdministrators != nil && *k.AddToAdministrators == true {
-			if err := addUserToGroup(k.UserName, "Administrators"); err != nil {
+		if k.AddToAdministrators != nil && *k.AddToAdministrators {
+			if err := addUserToGroup(ctx, k.UserName, "Administrators"); err != nil {
 				return nil, fmt.Errorf("error running addUserToGroup: %v", err)
 			}
 		}
 	} else {
 		logger.Infof("Creating user %s", k.UserName)
-		if err := createUser(k.UserName, pwd); err != nil {
+		if err := createUser(ctx, k.UserName, pwd); err != nil {
 			return nil, fmt.Errorf("error running createUser: %v", err)
 		}
-		if k.AddToAdministrators == nil || *k.AddToAdministrators == true {
-			if err := addUserToGroup(k.UserName, "Administrators"); err != nil {
+		if k.AddToAdministrators == nil || *k.AddToAdministrators {
+			if err := addUserToGroup(ctx, k.UserName, "Administrators"); err != nil {
 				return nil, fmt.Errorf("error running addUserToGroup: %v", err)
 			}
 		}
@@ -156,7 +146,7 @@ func (k windowsKey) createOrResetPwd() (*credsJSON, error) {
 	return createcredsJSON(k, pwd)
 }
 
-func createSSHUser(user string) error {
+func createSSHUser(ctx context.Context, user string) error {
 	pwd, err := newPwd(20)
 	if err != nil {
 		return fmt.Errorf("error creating password: %v", err)
@@ -165,17 +155,17 @@ func createSSHUser(user string) error {
 		return nil
 	}
 	logger.Infof("Creating user %s", user)
-	if err := createUser(user, pwd); err != nil {
+	if err := createUser(ctx, user, pwd); err != nil {
 		return fmt.Errorf("error running createUser: %v", err)
 	}
 
-	if err := addUserToGroup(user, "Administrators"); err != nil {
+	if err := addUserToGroup(ctx, user, "Administrators"); err != nil {
 		return fmt.Errorf("error running addUserToGroup: %v", err)
 	}
 	return nil
 }
 
-func createcredsJSON(k windowsKey, pwd string) (*credsJSON, error) {
+func createcredsJSON(k metadata.WindowsKey, pwd string) (*credsJSON, error) {
 	mod, err := base64.StdEncoding.DecodeString(k.Modulus)
 	if err != nil {
 		return nil, fmt.Errorf("error decoding modulus: %v", err)
@@ -221,7 +211,7 @@ func createcredsJSON(k windowsKey, pwd string) (*credsJSON, error) {
 	}, nil
 }
 
-func getWinSSHEnabled(md *metadata) bool {
+func getWinSSHEnabled(md *metadata.Descriptor) bool {
 	var enable bool
 	if md.Project.Attributes.EnableWindowsSSH != nil {
 		enable = *md.Project.Attributes.EnableWindowsSSH
@@ -232,54 +222,57 @@ func getWinSSHEnabled(md *metadata) bool {
 	return enable
 }
 
-type winAccountsMgr struct{}
+type winAccountsMgr struct {
+	// fakeWindows forces Disabled to run as if it was running in a windows system.
+	// mostly target for unit tests.
+	fakeWindows bool
+}
 
-func (a *winAccountsMgr) diff() bool {
+func (a *winAccountsMgr) Diff(ctx context.Context) (bool, error) {
 	oldSSHEnable := getWinSSHEnabled(oldMetadata)
 
 	sshEnable := getWinSSHEnabled(newMetadata)
 	if sshEnable != oldSSHEnable {
-		return true
+		return true, nil
 	}
 	if !reflect.DeepEqual(newMetadata.Instance.Attributes.WindowsKeys, oldMetadata.Instance.Attributes.WindowsKeys) {
-		return true
+		return true, nil
 	}
 	if !compareStringSlice(newMetadata.Instance.Attributes.SSHKeys, oldMetadata.Instance.Attributes.SSHKeys) {
-		return true
+		return true, nil
 	}
 	if !compareStringSlice(newMetadata.Project.Attributes.SSHKeys, oldMetadata.Project.Attributes.SSHKeys) {
-		return true
+		return true, nil
 	}
 	if newMetadata.Instance.Attributes.BlockProjectKeys != oldMetadata.Instance.Attributes.BlockProjectKeys {
-		return true
+		return true, nil
 	}
 
-	return false
+	return false, nil
 }
 
-func (a *winAccountsMgr) timeout() bool {
-	return false
+func (a *winAccountsMgr) Timeout(ctx context.Context) (bool, error) {
+	return false, nil
 }
 
-func (a *winAccountsMgr) disabled(os string) (disabled bool) {
-	if os != "windows" {
-		return true
+func (a *winAccountsMgr) Disabled(ctx context.Context) (bool, error) {
+	if !a.fakeWindows && runtime.GOOS != "windows" {
+		return true, nil
 	}
 
-	disabled, err := config.Section("accountManager").Key("disable").Bool()
-	if err == nil {
-		return disabled
+	config := cfg.Get()
+	if config.AccountManager != nil {
+		return config.AccountManager.Disable, nil
 	}
+
 	if newMetadata.Instance.Attributes.DisableAccountManager != nil {
-		return *newMetadata.Instance.Attributes.DisableAccountManager
+		return *newMetadata.Instance.Attributes.DisableAccountManager, nil
 	}
 	if newMetadata.Project.Attributes.DisableAccountManager != nil {
-		return *newMetadata.Project.Attributes.DisableAccountManager
+		return *newMetadata.Project.Attributes.DisableAccountManager, nil
 	}
-	return false
+	return false, nil
 }
-
-var badKeys []string
 
 type versionInfo struct {
 	major int
@@ -296,7 +289,7 @@ func parseVersionInfo(psOutput []byte) (versionInfo, error) {
 	splitVer := strings.Split(verStr, ".")
 
 	if len(splitVer) < 2 {
-		return verInfo, fmt.Errorf("Cannot parse OpenSSH version string: %v", verStr)
+		return verInfo, fmt.Errorf("cannot parse OpenSSH version string: %v", verStr)
 	}
 
 	majorVer, err := strconv.Atoi(splitVer[0])
@@ -315,7 +308,7 @@ func parseVersionInfo(psOutput []byte) (versionInfo, error) {
 }
 
 func versionOk(checkVersion versionInfo, minVersion versionInfo) error {
-	versionError := fmt.Errorf("Detected OpenSSH version may be incompatible with enable_windows_ssh. Found version %s, Need Version: %s", checkVersion, minVersion)
+	versionError := fmt.Errorf("detected OpenSSH version may be incompatible with enable_windows_ssh. Found version %s, Need Version: %s", checkVersion, minVersion)
 
 	if checkVersion.major < minVersion.major {
 		return versionError
@@ -328,32 +321,32 @@ func versionOk(checkVersion versionInfo, minVersion versionInfo) error {
 	return nil
 }
 
-func verifyWinSSHVersion() error {
+func verifyWinSSHVersion(ctx context.Context) error {
 	sshdPath, err := getWindowsServiceImagePath(sshdRegKey)
 	if err != nil {
-		return fmt.Errorf("Cannot determine sshd path: %v", err)
+		return fmt.Errorf("cannot determine sshd path: %v", err)
 	}
 
-	sshdVersion, err := getWindowsExeVersion(sshdPath)
+	sshdVersion, err := getWindowsExeVersion(ctx, sshdPath)
 	if err != nil {
-		return fmt.Errorf("Cannot determine OpenSSH Version: %v", err)
+		return fmt.Errorf("cannot determine OpenSSH Version: %v", err)
 	}
 
 	return versionOk(sshdVersion, minSSHVersion)
 }
 
-func (a *winAccountsMgr) set() error {
+func (a *winAccountsMgr) Set(ctx context.Context) error {
 	oldSSHEnable := getWinSSHEnabled(oldMetadata)
 	sshEnable := getWinSSHEnabled(newMetadata)
 
 	if sshEnable {
 		if sshEnable != oldSSHEnable {
-			err := verifyWinSSHVersion()
+			err := verifyWinSSHVersion(ctx)
 			if err != nil {
 				logger.Warningf(err.Error())
 			}
 
-			if !checkWindowsServiceRunning("sshd") {
+			if !checkWindowsServiceRunning(ctx, "sshd") {
 				logger.Warningf("The 'enable-windows-ssh' metadata key is set to 'true' " +
 					"but sshd does not appear to be running.")
 			}
@@ -371,7 +364,7 @@ func (a *winAccountsMgr) set() error {
 		mdKeyMap := getUserKeys(mdkeys)
 
 		for user := range mdKeyMap {
-			if err := createSSHUser(user); err != nil {
+			if err := createSSHUser(ctx, user); err != nil {
 				logger.Errorf("Error creating user: %s", err)
 			}
 		}
@@ -386,7 +379,7 @@ func (a *winAccountsMgr) set() error {
 	toAdd := compareAccounts(newKeys, regKeys)
 
 	for _, key := range toAdd {
-		creds, err := key.createOrResetPwd()
+		creds, err := createOrResetPwd(ctx, key)
 		if err == nil {
 			printCreds(creds)
 			continue
@@ -417,7 +410,7 @@ func (a *winAccountsMgr) set() error {
 
 var badReg []string
 
-func compareAccounts(newKeys windowsKeys, oldStrKeys []string) windowsKeys {
+func compareAccounts(newKeys metadata.WindowsKeys, oldStrKeys []string) metadata.WindowsKeys {
 	if len(newKeys) == 0 {
 		return nil
 	}
@@ -425,9 +418,9 @@ func compareAccounts(newKeys windowsKeys, oldStrKeys []string) windowsKeys {
 		return newKeys
 	}
 
-	var oldKeys windowsKeys
+	var oldKeys metadata.WindowsKeys
 	for _, s := range oldStrKeys {
-		var key windowsKey
+		var key metadata.WindowsKey
 		if err := json.Unmarshal([]byte(s), &key); err != nil {
 			if !utils.ContainsString(s, badReg) {
 				logger.Errorf("Bad windows key from registry: %s", err)
@@ -438,9 +431,9 @@ func compareAccounts(newKeys windowsKeys, oldStrKeys []string) windowsKeys {
 		oldKeys = append(oldKeys, key)
 	}
 
-	var toAdd windowsKeys
+	var toAdd metadata.WindowsKeys
 	for _, key := range newKeys {
-		if func(key windowsKey, oldKeys windowsKeys) bool {
+		if func(key metadata.WindowsKey, oldKeys metadata.WindowsKeys) bool {
 			for _, oldKey := range oldKeys {
 				if oldKey.UserName == key.UserName &&
 					oldKey.Modulus == key.Modulus &&
