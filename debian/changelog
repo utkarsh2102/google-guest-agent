@@ -1,3 +1,9 @@
+google-guest-agent (20231004.02-0ubuntu1~23.10.1) mantic; urgency=medium
+
+  * No-change rebuild for Mantic.
+
+ -- Utkarsh Gupta <utkarsh@ubuntu.com>  Thu, 26 Oct 2023 03:32:28 +0100
+
 google-guest-agent (20231004.02-0ubuntu1) noble; urgency=medium
 
   * New upstream version 20231004.02. (LP: #2040945)
