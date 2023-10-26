@@ -1,20 +1,21 @@
-//  Copyright 2017 Google Inc. All Rights Reserved.
-//
-//  Licensed under the Apache License, Version 2.0 (the "License");
-//  you may not use this file except in compliance with the License.
-//  You may obtain a copy of the License at
-//
-//      http://www.apache.org/licenses/LICENSE-2.0
-//
-//  Unless required by applicable law or agreed to in writing, software
-//  distributed under the License is distributed on an "AS IS" BASIS,
-//  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-//  See the License for the specific language governing permissions and
-//  limitations under the License.
+// Copyright 2017 Google LLC
+
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+
+//     https://www.apache.org/licenses/LICENSE-2.0
+
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
 package main
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/sha1"
@@ -28,7 +29,8 @@ import (
 	"time"
 	"unicode"
 
-	"github.com/go-ini/ini"
+	"github.com/GoogleCloudPlatform/guest-agent/metadata"
+	"github.com/GoogleCloudPlatform/guest-agent/utils"
 )
 
 func mkptr(b bool) *bool {
@@ -47,8 +49,10 @@ func TestExpired(t *testing.T) {
 	}
 
 	for _, tt := range tests {
-		k := windowsKey{ExpireOn: tt.sTime}
-		if tt.e != k.expired() {
+		k := metadata.WindowsKey{ExpireOn: tt.sTime}
+
+		expired, _ := utils.CheckExpired(k.ExpireOn)
+		if tt.e != expired {
 			t.Errorf("windowsKey.expired() with ExpiredOn %q should return %t", k.ExpireOn, tt.e)
 		}
 	}
@@ -58,38 +62,49 @@ func TestAccountsDisabled(t *testing.T) {
 	var tests = []struct {
 		name string
 		data []byte
-		md   *metadata
+		md   *metadata.Descriptor
 		want bool
 	}{
-		{"not explicitly disabled", []byte(""), &metadata{}, false},
-		{"enabled in cfg only", []byte("[accountManager]\ndisable=false"), &metadata{}, false},
-		{"disabled in cfg only", []byte("[accountManager]\ndisable=true"), &metadata{}, true},
-		{"disabled in cfg, enabled in instance metadata", []byte("[accountManager]\ndisable=true"), &metadata{Instance: instance{Attributes: attributes{DisableAccountManager: mkptr(false)}}}, true},
-		{"enabled in cfg, disabled in instance metadata", []byte("[accountManager]\ndisable=false"), &metadata{Instance: instance{Attributes: attributes{DisableAccountManager: mkptr(true)}}}, false},
-		{"enabled in instance metadata only", []byte(""), &metadata{Instance: instance{Attributes: attributes{DisableAccountManager: mkptr(false)}}}, false},
-		{"enabled in project metadata only", []byte(""), &metadata{Project: project{Attributes: attributes{DisableAccountManager: mkptr(false)}}}, false},
-		{"disabled in instance metadata only", []byte(""), &metadata{Instance: instance{Attributes: attributes{DisableAccountManager: mkptr(true)}}}, true},
-		{"enabled in instance metadata, disabled in project metadata", []byte(""), &metadata{Instance: instance{Attributes: attributes{DisableAccountManager: mkptr(false)}}, Project: project{Attributes: attributes{DisableAccountManager: mkptr(true)}}}, false},
-		{"disabled in project metadata only", []byte(""), &metadata{Project: project{Attributes: attributes{DisableAccountManager: mkptr(true)}}}, true},
+		{"not explicitly disabled", []byte(""), &metadata.Descriptor{}, false},
+		{"enabled in cfg only", []byte("[accountManager]\ndisable=false"), &metadata.Descriptor{}, false},
+		{"disabled in cfg only", []byte("[accountManager]\ndisable=true"), &metadata.Descriptor{}, true},
+		{"disabled in cfg, enabled in instance metadata", []byte("[accountManager]\ndisable=true"), &metadata.Descriptor{Instance: metadata.Instance{Attributes: metadata.Attributes{DisableAccountManager: mkptr(false)}}}, true},
+		{"enabled in cfg, disabled in instance metadata", []byte("[accountManager]\ndisable=false"), &metadata.Descriptor{Instance: metadata.Instance{Attributes: metadata.Attributes{DisableAccountManager: mkptr(true)}}}, false},
+		{"enabled in instance metadata only", []byte(""), &metadata.Descriptor{Instance: metadata.Instance{Attributes: metadata.Attributes{DisableAccountManager: mkptr(false)}}}, false},
+		{"enabled in project metadata only", []byte(""), &metadata.Descriptor{Project: metadata.Project{Attributes: metadata.Attributes{DisableAccountManager: mkptr(false)}}}, false},
+		{"disabled in instance metadata only", []byte(""), &metadata.Descriptor{Instance: metadata.Instance{Attributes: metadata.Attributes{DisableAccountManager: mkptr(true)}}}, true},
+		{"enabled in instance metadata, disabled in project metadata", []byte(""), &metadata.Descriptor{Instance: metadata.Instance{Attributes: metadata.Attributes{DisableAccountManager: mkptr(false)}}, Project: metadata.Project{Attributes: metadata.Attributes{DisableAccountManager: mkptr(true)}}}, false},
+		{"disabled in project metadata only", []byte(""), &metadata.Descriptor{Project: metadata.Project{Attributes: metadata.Attributes{DisableAccountManager: mkptr(true)}}}, true},
 	}
 
+	ctx := context.Background()
 	for _, tt := range tests {
-		cfg, err := ini.InsensitiveLoad(tt.data)
-		if err != nil {
-			t.Errorf("test case %q: error parsing config: %v", tt.name, err)
-			continue
-		}
-		if cfg == nil {
-			cfg = &ini.File{}
-		}
-		newMetadata = tt.md
-		config = cfg
-		got := (&winAccountsMgr{}).disabled("windows")
-		if got != tt.want {
-			t.Errorf("test case %q, accounts.disabled() got: %t, want: %t", tt.name, got, tt.want)
-		}
+		t.Run(tt.name, func(t *testing.T) {
+			reloadConfig(t, tt.data)
+
+			newMetadata = tt.md
+			mgr := &winAccountsMgr{
+				fakeWindows: true,
+			}
+
+			got, err := mgr.Disabled(ctx)
+			if err != nil {
+				t.Errorf("Failed to run winAccountsMgr's Disabled() call: %+v", err)
+			}
+
+			if got != tt.want {
+				t.Errorf("accounts.disabled() got: %t, want: %t", got, tt.want)
+			}
+		})
 	}
-	got := (&winAccountsMgr{}).disabled("linux")
+
+	reloadConfig(t, nil)
+
+	got, err := (&winAccountsMgr{}).Disabled(ctx)
+	if err != nil {
+		t.Errorf("Failed to run winAccountsMgr's Disabled() call: %+v", err)
+	}
+
 	if got != true {
 		t.Errorf("winAccountsMgr.disabled(\"linux\") got: %t, want: true", got)
 	}
@@ -150,7 +165,7 @@ func TestCreatecredsJSON(t *testing.T) {
 	if err != nil {
 		t.Fatalf("error generating key: %v", err)
 	}
-	k := windowsKey{
+	k := metadata.WindowsKey{
 		Email:    "email",
 		ExpireOn: "expire",
 		Exponent: base64.StdEncoding.EncodeToString(new(big.Int).SetInt64(int64(prv.PublicKey.E)).Bytes()),
@@ -192,18 +207,18 @@ func TestCreatecredsJSON(t *testing.T) {
 
 func TestCompareAccounts(t *testing.T) {
 	var tests = []struct {
-		newKeys    windowsKeys
+		newKeys    metadata.WindowsKeys
 		oldStrKeys []string
-		wantAdd    windowsKeys
+		wantAdd    metadata.WindowsKeys
 	}{
 		// These should return toAdd:
 		// In MD, not Reg
-		{windowsKeys{{UserName: "foo"}}, nil, windowsKeys{{UserName: "foo"}}},
-		{windowsKeys{{UserName: "foo"}}, []string{`{"UserName":"bar"}`}, windowsKeys{{UserName: "foo"}}},
+		{metadata.WindowsKeys{{UserName: "foo"}}, nil, metadata.WindowsKeys{{UserName: "foo"}}},
+		{metadata.WindowsKeys{{UserName: "foo"}}, []string{`{"UserName":"bar"}`}, metadata.WindowsKeys{{UserName: "foo"}}},
 
 		// These should return nothing:
 		// In Reg and MD
-		{windowsKeys{{UserName: "foo"}}, []string{`{"UserName":"foo"}`}, nil},
+		{metadata.WindowsKeys{{UserName: "foo"}}, []string{`{"UserName":"foo"}`}, nil},
 		// In Reg, not MD
 		{nil, []string{`{UserName":"foo"}`}, nil},
 	}
@@ -258,7 +273,7 @@ func TestGetUserKeys(t *testing.T) {
 
 	for _, tt := range tests {
 		ret := getUserKeys([]string{tt.key})
-		if userKeys, _ := ret["user"]; len(userKeys) != tt.expectedValid {
+		if userKeys := ret["user"]; len(userKeys) != tt.expectedValid {
 			t.Errorf("expected %d valid keys from getUserKeys, but %d", tt.expectedValid, len(userKeys))
 		}
 	}

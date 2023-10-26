@@ -1,28 +1,32 @@
-//  Copyright 2019 Google Inc. All Rights Reserved.
-//
-//  Licensed under the Apache License, Version 2.0 (the "License");
-//  you may not use this file except in compliance with the License.
-//  You may obtain a copy of the License at
-//
-//      http://www.apache.org/licenses/LICENSE-2.0
-//
-//  Unless required by applicable law or agreed to in writing, software
-//  distributed under the License is distributed on an "AS IS" BASIS,
-//  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-//  See the License for the specific language governing permissions and
-//  limitations under the License.
+// Copyright 2019 Google LLC
+
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+
+//     https://www.apache.org/licenses/LICENSE-2.0
+
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
 package main
 
 import (
+	"context"
 	"fmt"
-	"io/ioutil"
 	"os"
 	"os/exec"
 	"runtime"
 	"strings"
 	"time"
 
+	"github.com/GoogleCloudPlatform/guest-agent/google_guest_agent/cfg"
+	"github.com/GoogleCloudPlatform/guest-agent/google_guest_agent/events/sshtrustedca"
+	"github.com/GoogleCloudPlatform/guest-agent/google_guest_agent/run"
+	"github.com/GoogleCloudPlatform/guest-agent/metadata"
 	"github.com/GoogleCloudPlatform/guest-logging-go/logger"
 )
 
@@ -36,7 +40,7 @@ type osloginMgr struct{}
 
 // We also read project keys first, letting instance-level keys take
 // precedence.
-func getOSLoginEnabled(md *metadata) (bool, bool, bool) {
+func getOSLoginEnabled(md *metadata.Descriptor) (bool, bool, bool) {
 	var enable bool
 	if md.Project.Attributes.EnableOSLogin != nil {
 		enable = *md.Project.Attributes.EnableOSLogin
@@ -61,25 +65,25 @@ func getOSLoginEnabled(md *metadata) (bool, bool, bool) {
 	return enable, twofactor, skey
 }
 
-func (o *osloginMgr) diff() bool {
+func (o *osloginMgr) Diff(ctx context.Context) (bool, error) {
 	oldEnable, oldTwoFactor, oldSkey := getOSLoginEnabled(oldMetadata)
 	enable, twofactor, skey := getOSLoginEnabled(newMetadata)
 	return oldMetadata.Project.ProjectID == "" ||
 		// True on first run or if any value has changed.
 		(oldTwoFactor != twofactor) ||
 		(oldEnable != enable) ||
-		(oldSkey != skey)
+		(oldSkey != skey), nil
 }
 
-func (o *osloginMgr) timeout() bool {
-	return false
+func (o *osloginMgr) Timeout(ctx context.Context) (bool, error) {
+	return false, nil
 }
 
-func (o *osloginMgr) disabled(os string) bool {
-	return os == "windows"
+func (o *osloginMgr) Disabled(ctx context.Context) (bool, error) {
+	return runtime.GOOS == "windows", nil
 }
 
-func (o *osloginMgr) set() error {
+func (o *osloginMgr) Set(ctx context.Context) error {
 	// We need to know if it was previously enabled for the clearing of
 	// metadata-based SSH keys.
 	oldEnable, _, _ := getOSLoginEnabled(oldMetadata)
@@ -89,7 +93,7 @@ func (o *osloginMgr) set() error {
 		logger.Infof("Enabling OS Login")
 		newMetadata.Instance.Attributes.SSHKeys = nil
 		newMetadata.Project.Attributes.SSHKeys = nil
-		(&accountsMgr{}).set()
+		(&accountsMgr{}).Set(ctx)
 	}
 
 	if !enable && oldEnable {
@@ -115,7 +119,7 @@ func (o *osloginMgr) set() error {
 	for _, svc := range []string{"nscd", "unscd", "systemd-logind", "cron", "crond"} {
 		// These services should be restarted if running
 		logger.Debugf("systemctl try-restart %s, if it exists", svc)
-		if err := systemctlTryRestart(svc); err != nil {
+		if err := systemctlTryRestart(ctx, svc); err != nil {
 			logger.Errorf("Error restarting service: %v.", err)
 		}
 	}
@@ -123,17 +127,17 @@ func (o *osloginMgr) set() error {
 	// SSH should be started if not running, reloaded otherwise.
 	for _, svc := range []string{"ssh", "sshd"} {
 		logger.Debugf("systemctl reload-or-restart %s, if it exists", svc)
-		if err := systemctlReloadOrRestart(svc); err != nil {
+		if err := systemctlReloadOrRestart(ctx, svc); err != nil {
 			logger.Errorf("Error reloading service: %v.", err)
 		}
 	}
 
 	now := fmt.Sprintf("%d", time.Now().Unix())
-	writeGuestAttributes("guest-agent/sshable", now)
+	mdsClient.WriteGuestAttributes(ctx, "guest-agent/sshable", now)
 
 	if enable {
 		logger.Debugf("Create OS Login dirs, if needed")
-		if err := createOSLoginDirs(); err != nil {
+		if err := createOSLoginDirs(ctx); err != nil {
 			logger.Errorf("Error creating OS Login directory: %v.", err)
 		}
 
@@ -143,7 +147,7 @@ func (o *osloginMgr) set() error {
 		}
 
 		logger.Debugf("starting OS Login nss cache fill")
-		if err := runCmd(exec.Command("google_oslogin_nss_cache")); err != nil {
+		if err := run.Quiet(ctx, "google_oslogin_nss_cache"); err != nil {
 			logger.Errorf("Error updating NSS cache: %v.", err)
 		}
 
@@ -198,8 +202,14 @@ func updateSSHConfig(sshConfig string, enable, twofactor, skey bool) string {
 		}
 	}
 	authorizedKeysUser := "AuthorizedKeysCommandUser root"
+
+	// Certificate based authentication.
+	authorizedPrincipalsCommand := "AuthorizedPrincipalsCommand /usr/bin/google_authorized_principals %u %k"
+	authorizedPrincipalsUser := "AuthorizedPrincipalsCommandUser root"
+	trustedUserCAKeys := "TrustedUserCAKeys " + sshtrustedca.DefaultPipePath
+
 	twoFactorAuthMethods := "AuthenticationMethods publickey,keyboard-interactive"
-	if (osRelease.os == "rhel" || osRelease.os == "centos") && osRelease.version.major == 6 {
+	if (osInfo.OS == "rhel" || osInfo.OS == "centos") && osInfo.Version.Major == 6 {
 		authorizedKeysUser = "AuthorizedKeysCommandRunAs root"
 		twoFactorAuthMethods = "RequiredAuthentications2 publickey,keyboard-interactive"
 	}
@@ -209,7 +219,14 @@ func updateSSHConfig(sshConfig string, enable, twofactor, skey bool) string {
 	filtered := filterGoogleLines(string(sshConfig))
 
 	if enable {
-		osLoginBlock := []string{googleBlockStart, authorizedKeysCommand, authorizedKeysUser}
+		osLoginBlock := []string{googleBlockStart}
+
+		if cfg.Get().OSLogin.CertAuthentication {
+			osLoginBlock = append(osLoginBlock, trustedUserCAKeys, authorizedPrincipalsCommand, authorizedPrincipalsUser)
+		}
+
+		osLoginBlock = append(osLoginBlock, authorizedKeysCommand, authorizedKeysUser)
+
 		if twofactor {
 			osLoginBlock = append(osLoginBlock, twoFactorAuthMethods, challengeResponseEnable)
 		}
@@ -224,7 +241,7 @@ func updateSSHConfig(sshConfig string, enable, twofactor, skey bool) string {
 }
 
 func writeSSHConfig(enable, twofactor, skey bool) error {
-	sshConfig, err := ioutil.ReadFile("/etc/ssh/sshd_config")
+	sshConfig, err := os.ReadFile("/etc/ssh/sshd_config")
 	if err != nil {
 		return err
 	}
@@ -258,7 +275,7 @@ func updateNSSwitchConfig(nsswitch string, enable bool) string {
 }
 
 func writeNSSwitchConfig(enable bool) error {
-	nsswitch, err := ioutil.ReadFile("/etc/nsswitch.conf")
+	nsswitch, err := os.ReadFile("/etc/nsswitch.conf")
 	if err != nil {
 		return err
 	}
@@ -269,20 +286,14 @@ func writeNSSwitchConfig(enable bool) error {
 	return writeConfigFile("/etc/nsswitch.conf", proposed)
 }
 
-// Adds entries to the PAM config for sshd and su which reflect the current
-// enablements. Only writes files if they have changed from what's on disk.
-func updatePAMsshd(pamsshd string, enable, twofactor bool) string {
+func updatePAMsshdPamless(pamsshd string, enable, twofactor bool) string {
 	authOSLogin := "auth       [success=done perm_denied=die default=ignore] pam_oslogin_login.so"
 	authGroup := "auth       [default=ignore] pam_group.so"
-	accountOSLogin := "account    [success=ok ignore=ignore default=die] pam_oslogin_login.so"
-	accountOSLoginAdmin := "account    [success=ok default=ignore] pam_oslogin_admin.so"
 	sessionHomeDir := "session    [success=ok default=ignore] pam_mkhomedir.so"
 
 	if runtime.GOOS == "freebsd" {
 		authOSLogin = "auth       optional pam_oslogin_login.so"
 		authGroup = "auth       optional pam_group.so"
-		accountOSLogin = "account    requisite pam_oslogin_login.so"
-		accountOSLoginAdmin = "account    optional pam_oslogin_admin.so"
 		sessionHomeDir = "session    optional pam_mkhomedir.so"
 	}
 
@@ -293,7 +304,7 @@ func updatePAMsshd(pamsshd string, enable, twofactor bool) string {
 			topOfFile = append(topOfFile, authOSLogin)
 		}
 		topOfFile = append(topOfFile, authGroup, googleBlockEnd)
-		bottomOfFile := []string{googleBlockStart, accountOSLogin, accountOSLoginAdmin, sessionHomeDir, googleBlockEnd}
+		bottomOfFile := []string{googleBlockStart, sessionHomeDir, googleBlockEnd}
 		filtered = append(topOfFile, filtered...)
 		filtered = append(filtered, bottomOfFile...)
 	}
@@ -301,11 +312,12 @@ func updatePAMsshd(pamsshd string, enable, twofactor bool) string {
 }
 
 func writePAMConfig(enable, twofactor bool) error {
-	pamsshd, err := ioutil.ReadFile("/etc/pam.d/sshd")
+	pamsshd, err := os.ReadFile("/etc/pam.d/sshd")
 	if err != nil {
 		return err
 	}
-	proposed := updatePAMsshd(string(pamsshd), enable, twofactor)
+
+	proposed := updatePAMsshdPamless(string(pamsshd), enable, twofactor)
 	if proposed != string(pamsshd) {
 		if err := writeConfigFile("/etc/pam.d/sshd", proposed); err != nil {
 			return err
@@ -327,7 +339,7 @@ func updateGroupConf(groupconf string, enable bool) string {
 }
 
 func writeGroupConf(enable bool) error {
-	groupconf, err := ioutil.ReadFile("/etc/security/group.conf")
+	groupconf, err := os.ReadFile("/etc/security/group.conf")
 	if err != nil {
 		return err
 	}
@@ -341,7 +353,7 @@ func writeGroupConf(enable bool) error {
 }
 
 // Creates necessary OS Login directories if they don't exist.
-func createOSLoginDirs() error {
+func createOSLoginDirs(ctx context.Context) error {
 	restorecon, restoreconerr := exec.LookPath("restorecon")
 
 	for _, dir := range []string{"/var/google-sudoers.d", "/var/google-users.d"} {
@@ -350,7 +362,7 @@ func createOSLoginDirs() error {
 			return err
 		}
 		if restoreconerr == nil {
-			runCmd(exec.Command(restorecon, dir))
+			run.Quiet(ctx, restorecon, dir)
 		}
 	}
 	return nil
@@ -374,32 +386,32 @@ func createOSLoginSudoersFile() error {
 
 // systemctlTryRestart tries to restart a systemd service if it is already
 // running. Stopped services will be ignored.
-func systemctlTryRestart(servicename string) error {
-	if !systemctlUnitExists(servicename) {
+func systemctlTryRestart(ctx context.Context, servicename string) error {
+	if !systemctlUnitExists(ctx, servicename) {
 		return nil
 	}
-	return runCmd(exec.Command("systemctl", "try-restart", servicename+".service"))
+	return run.Quiet(ctx, "systemctl", "try-restart", servicename+".service")
 }
 
 // systemctlReloadOrRestart tries to reload a running systemd service if
 // supported, restart otherwise. Stopped services will be started.
-func systemctlReloadOrRestart(servicename string) error {
-	if !systemctlUnitExists(servicename) {
+func systemctlReloadOrRestart(ctx context.Context, servicename string) error {
+	if !systemctlUnitExists(ctx, servicename) {
 		return nil
 	}
-	return runCmd(exec.Command("systemctl", "reload-or-restart", servicename+".service"))
+	return run.Quiet(ctx, "systemctl", "reload-or-restart", servicename+".service")
 }
 
 // systemctlStart tries to start a stopped systemd service. Started services
 // will be ignored.
-func systemctlStart(servicename string) error {
-	if !systemctlUnitExists(servicename) {
+func systemctlStart(ctx context.Context, servicename string) error {
+	if !systemctlUnitExists(ctx, servicename) {
 		return nil
 	}
-	return runCmd(exec.Command("systemctl", "start", servicename+".service"))
+	return run.Quiet(ctx, "systemctl", "start", servicename+".service")
 }
 
-func systemctlUnitExists(servicename string) bool {
-	res := runCmdOutput(exec.Command("systemctl", "list-units", "--all", servicename+".service"))
-	return !strings.Contains(res.Stdout(), "0 loaded units listed")
+func systemctlUnitExists(ctx context.Context, servicename string) bool {
+	res := run.WithOutput(ctx, "systemctl", "list-units", "--all", servicename+".service")
+	return !strings.Contains(res.StdOut, "0 loaded units listed")
 }
