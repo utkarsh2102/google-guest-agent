@@ -1,0 +1,5 @@
+# ignore all built binaries
+**/gce_workload_cert_refresh
+**/google_authorized_keys
+**/google_guest_agent
+**/google_metadata_script_runner
