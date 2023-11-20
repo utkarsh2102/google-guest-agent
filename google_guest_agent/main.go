@@ -1,61 +1,71 @@
-//  Copyright 2017 Google Inc. All Rights Reserved.
-//
-//  Licensed under the Apache License, Version 2.0 (the "License");
-//  you may not use this file except in compliance with the License.
-//  You may obtain a copy of the License at
-//
-//      http://www.apache.org/licenses/LICENSE-2.0
-//
-//  Unless required by applicable law or agreed to in writing, software
-//  distributed under the License is distributed on an "AS IS" BASIS,
-//  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-//  See the License for the specific language governing permissions and
-//  limitations under the License.
+// Copyright 2017 Google LLC
+
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+
+//     https://www.apache.org/licenses/LICENSE-2.0
+
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
 // GCEGuestAgent is the Google Compute Engine guest agent executable.
 package main
 
 import (
-	"bytes"
 	"context"
-	"errors"
 	"fmt"
 	"io"
-	"net"
-	"net/url"
 	"os"
-	"os/exec"
 	"runtime"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/GoogleCloudPlatform/guest-agent/google_guest_agent/agentcrypto"
+	"github.com/GoogleCloudPlatform/guest-agent/google_guest_agent/cfg"
+	"github.com/GoogleCloudPlatform/guest-agent/google_guest_agent/events"
+	mdsEvent "github.com/GoogleCloudPlatform/guest-agent/google_guest_agent/events/metadata"
+	"github.com/GoogleCloudPlatform/guest-agent/google_guest_agent/events/sshtrustedca"
+	"github.com/GoogleCloudPlatform/guest-agent/google_guest_agent/osinfo"
+	"github.com/GoogleCloudPlatform/guest-agent/google_guest_agent/scheduler"
+	"github.com/GoogleCloudPlatform/guest-agent/google_guest_agent/sshca"
+	"github.com/GoogleCloudPlatform/guest-agent/google_guest_agent/telemetry"
+	"github.com/GoogleCloudPlatform/guest-agent/metadata"
 	"github.com/GoogleCloudPlatform/guest-agent/utils"
 	"github.com/GoogleCloudPlatform/guest-logging-go/logger"
-	"github.com/go-ini/ini"
 )
+
+// Certificates wrapps a list of certificate authorities.
+type Certificates struct {
+	Certs []TrustedCert `json:"trustedCertificateAuthorities"`
+}
+
+// TrustedCert defines the object containing a public key.
+type TrustedCert struct {
+	PublicKey string `json:"publicKey"`
+}
 
 var (
 	programName              = "GCEGuestAgent"
 	version                  string
-	ticker                   = time.Tick(70 * time.Second)
-	oldMetadata, newMetadata *metadata
-	config                   *ini.File
-	osRelease                release
-	action                   string
+	oldMetadata, newMetadata *metadata.Descriptor
+	osInfo                   osinfo.OSInfo
+	mdsClient                *metadata.Client
 )
 
 const (
-	winConfigPath = `C:\Program Files\Google\Compute Engine\instance_configs.cfg`
-	configPath    = `/etc/default/instance_configs.cfg`
-	regKeyBase    = `SOFTWARE\Google\ComputeEngine`
+	regKeyBase = `SOFTWARE\Google\ComputeEngine`
 )
 
 type manager interface {
-	diff() bool
-	disabled(string) bool
-	set() error
-	timeout() bool
+	Diff(ctx context.Context) (bool, error)
+	Disabled(ctx context.Context) (bool, error)
+	Set(ctx context.Context) error
+	Timeout(ctx context.Context) (bool, error)
 }
 
 func logStatus(name string, disabled bool) {
@@ -69,15 +79,6 @@ func logStatus(name string, disabled bool) {
 	logger.Infof("GCE %s manager status: %s", name, status)
 }
 
-func parseConfig(file string) (*ini.File, error) {
-	// Priority: file.cfg, file.cfg.distro, file.cfg.template
-	cfg, err := ini.LoadSources(ini.LoadOptions{Loose: true, Insensitive: true}, file, file+".distro", file+".template")
-	if err != nil {
-		return nil, err
-	}
-	return cfg, nil
-}
-
 func closeFile(c io.Closer) {
 	err := c.Close()
 	if err != nil {
@@ -85,37 +86,71 @@ func closeFile(c io.Closer) {
 	}
 }
 
-func runUpdate() {
-	var wg sync.WaitGroup
-	mgrs := []manager{&addressMgr{}}
-	switch runtime.GOOS {
-	case "windows":
-		mgrs = append(mgrs, []manager{newWsfcManager(), &winAccountsMgr{}, &diagnosticsMgr{}}...)
-	default:
-		mgrs = append(mgrs, []manager{&clockskewMgr{}, &osloginMgr{}, &accountsMgr{}}...)
+func availableManagers() []manager {
+	managers := []manager{
+		&addressMgr{},
 	}
-	for _, mgr := range mgrs {
+
+	if runtime.GOOS == "windows" {
+		return append(managers,
+			newWsfcManager(),
+			&winAccountsMgr{},
+			&diagnosticsMgr{},
+		)
+	}
+
+	return append(managers,
+		&clockskewMgr{},
+		&osloginMgr{},
+		&accountsMgr{},
+	)
+}
+
+func runUpdate(ctx context.Context) {
+	var wg sync.WaitGroup
+	for _, mgr := range availableManagers() {
 		wg.Add(1)
 		go func(mgr manager) {
 			defer wg.Done()
-			if mgr.disabled(runtime.GOOS) {
+
+			disabled, err := mgr.Disabled(ctx)
+			if err != nil {
+				logger.Errorf("Failed to run manager's Disabled() call: %+v", err)
+				return
+			}
+
+			if disabled {
 				logger.Debugf("manager %#v disabled, skipping", mgr)
 				return
 			}
-			if !mgr.timeout() && !mgr.diff() {
-				logger.Debugf("manager %#v reports no diff", mgr)
+
+			timeout, err := mgr.Timeout(ctx)
+			if err != nil {
+				logger.Errorf("[%#v] Failed to run manager Timeout() call: %+v", mgr, err)
 				return
 			}
+
+			diff, err := mgr.Diff(ctx)
+			if err != nil {
+				logger.Errorf("[%#v] Failed to run manager Diff() call: %+v", mgr, err)
+				return
+			}
+
+			if !timeout && !diff {
+				logger.Debugf("[%#v] Manager reports no diff", mgr)
+				return
+			}
+
 			logger.Debugf("running %#v manager", mgr)
-			if err := mgr.set(); err != nil {
-				logger.Errorf("error running %#v manager: %s", mgr, err)
+			if err := mgr.Set(ctx); err != nil {
+				logger.Errorf("[%#v] Failed to run manager Set() call: %s", mgr, err)
 			}
 		}(mgr)
 	}
 	wg.Wait()
 }
 
-func run(ctx context.Context) {
+func runAgent(ctx context.Context) {
 	opts := logger.LogOpts{LoggerName: programName}
 	if runtime.GOOS == "windows" {
 		opts.FormatFunction = logFormatWindows
@@ -126,14 +161,9 @@ func run(ctx context.Context) {
 		// Local logging is syslog; we will just use stdout in Linux.
 		opts.DisableLocalLogging = true
 	}
+
 	if os.Getenv("GUEST_AGENT_DEBUG") != "" {
 		opts.Debug = true
-	}
-
-	var err error
-	newMetadata, err = getMetadata(ctx, false)
-	if err == nil {
-		opts.ProjectName = newMetadata.Project.ProjectID
 	}
 
 	if err := logger.Init(ctx, opts); err != nil {
@@ -143,116 +173,79 @@ func run(ctx context.Context) {
 
 	logger.Infof("GCE Agent Started (version %s)", version)
 
-	osRelease, err = getRelease()
-	if err != nil && runtime.GOOS != "windows" {
-		logger.Warningf("Couldn't detect OS release")
-	}
-
-	cfgfile := configPath
-	if runtime.GOOS == "windows" {
-		cfgfile = winConfigPath
-	}
-
-	config, err = parseConfig(cfgfile)
-	if err != nil && !os.IsNotExist(err) {
-		logger.Errorf("Error parsing config %s: %s", cfgfile, err)
-	}
+	osInfo = osinfo.Get()
+	mdsClient = metadata.New()
 
 	agentInit(ctx)
 
-	go func() {
-		oldMetadata = &metadata{}
-		webError := 0
-		for {
-			var err error
-			newMetadata, err = watchMetadata(ctx)
-			if err != nil {
-				// Only log the second web error to avoid transient errors and
-				// not to spam the log on network failures.
-				if webError == 1 {
-					if urlErr, ok := err.(*url.Error); ok {
-						if _, ok := urlErr.Err.(*net.OpError); ok {
-							logger.Errorf("Network error when requesting metadata, make sure your instance has an active network and can reach the metadata server.")
-						}
-					}
-					logger.Errorf("Error watching metadata: %s", err)
-				}
-				webError++
-				time.Sleep(5 * time.Second)
-				continue
-			}
-			select {
-			case <-ctx.Done():
-				return
-			default:
-			}
-			runUpdate()
-			oldMetadata = newMetadata
-			webError = 0
+	// Previous request to metadata *may* not have worked becasue routes don't get added until agentInit.
+	var err error
+	if newMetadata == nil {
+		/// Error here doesn't matter, if we cant get metadata, we cant record telemetry.
+		newMetadata, err = mdsClient.Get(ctx)
+		if err != nil {
+			logger.Debugf("Error getting metdata: %v", err)
 		}
-	}()
-
-	<-ctx.Done()
-	logger.Infof("GCE Agent Stopped")
-}
-
-type execResult struct {
-	// Return code. Set to -1 if we failed to run the command.
-	code int
-	// Stderr or err.Error if we failed to run the command.
-	err string
-	// Stdout or "" if we failed to run the command.
-	out string
-}
-
-func (e execResult) Error() string {
-	return strings.TrimSuffix(e.err, "\n")
-}
-
-func (e execResult) ExitCode() int {
-	return e.code
-}
-
-func (e execResult) Stdout() string {
-	return e.out
-}
-
-func (e execResult) Stderr() string {
-	return e.err
-}
-
-func runCmd(cmd *exec.Cmd) error {
-	res := runCmdOutput(cmd)
-	if res.ExitCode() != 0 {
-		return res
 	}
-	return nil
-}
 
-func runCmdOutput(cmd *exec.Cmd) *execResult {
-	logger.Debugf("exec: %v", cmd)
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
+	// Try to re-initialize logger now, we know after agentInit() is more likely to have metadata available.
+	// TODO: move all this metadata dependent code to its own metadata event handler.
+	if newMetadata != nil {
+		opts.ProjectName = newMetadata.Project.ProjectID
+		if err := logger.Init(ctx, opts); err != nil {
+			logger.Errorf("Error initializing logger: %v", err)
+		}
+	}
 
-	err := cmd.Run()
+	// knownJobs is list of default jobs that run on a pre-defined schedule.
+	knownJobs := []scheduler.Job{telemetry.New(mdsClient, programName, version)}
+	scheduler.ScheduleJobs(ctx, knownJobs, false)
+
+	// Schedules jobs that need to be started before notifying systemd Agent process has started.
+	if cfg.Get().Unstable.MDSMTLS {
+		scheduler.ScheduleJobs(ctx, []scheduler.Job{agentcrypto.New()}, true)
+	}
+
+	eventsConfig := &events.Config{
+		Watchers: []string{
+			mdsEvent.WatcherID,
+			sshtrustedca.WatcherID,
+		},
+	}
+
+	eventManager, err := events.New(eventsConfig)
 	if err != nil {
-		if ee, ok := err.(*exec.ExitError); ok {
-			return &execResult{code: ee.ExitCode(), out: stdout.String(), err: stderr.String()}
-		}
-		return &execResult{code: -1, err: err.Error()}
+		logger.Errorf("Error initializing event manager: %v", err)
+		return
 	}
-	return &execResult{code: 0, out: stdout.String()}
-}
 
-func runCmdOutputWithTimeout(timeoutSec time.Duration, name string, args ...string) *execResult {
-	ctx, cancel := context.WithTimeout(context.Background(), timeoutSec)
-	defer cancel()
-	execResult := runCmdOutput(exec.CommandContext(ctx, name, args...))
-	if ctx.Err() != nil && errors.Is(ctx.Err(), context.DeadlineExceeded) {
-		execResult.code = 124 // By convention
-	}
-	return execResult
+	sshca.Init(eventManager)
+
+	oldMetadata = &metadata.Descriptor{}
+	eventManager.Subscribe(mdsEvent.LongpollEvent, nil, func(ctx context.Context, evType string, data interface{}, evData *events.EventData) bool {
+		logger.Debugf("Handling metadata %q event.", evType)
+
+		// If metadata watcher failed there isn't much we can do, just ignore the event and
+		// allow the water to get it corrected.
+		if evData.Error != nil {
+			logger.Infof("Metadata event watcher failed, ignoring: %+v", evData.Error)
+			return true
+		}
+
+		if evData.Data == nil {
+			logger.Infof("Metadata event watcher didn't pass in the metadata, ignoring.")
+			return true
+		}
+
+		newMetadata = evData.Data.(*metadata.Descriptor)
+		runUpdate(ctx)
+		oldMetadata = newMetadata
+
+		return true
+	})
+
+	eventManager.Run(ctx)
+	logger.Infof("GCE Agent Stopped")
 }
 
 func logFormatWindows(e logger.LogEntry) string {
@@ -282,6 +275,11 @@ func closer(c io.Closer) {
 func main() {
 	ctx := context.Background()
 
+	if err := cfg.Load(nil); err != nil {
+		fmt.Fprintf(os.Stderr, "Failed to load configuration: %+v", err)
+		os.Exit(1)
+	}
+
 	var action string
 	if len(os.Args) < 2 {
 		action = "run"
@@ -290,11 +288,11 @@ func main() {
 	}
 
 	if action == "noservice" {
-		run(ctx)
+		runAgent(ctx)
 		os.Exit(0)
 	}
 
-	if err := register(ctx, "GCEAgent", "GCEAgent", "", run, action); err != nil {
+	if err := register(ctx, "GCEAgent", "GCEAgent", "", runAgent, action); err != nil {
 		logger.Fatalf("error registering service: %s", err)
 	}
 }
