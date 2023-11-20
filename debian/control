@@ -6,7 +6,7 @@ Testsuite: autopkgtest-pkg-go
 Priority: optional
 Build-Depends: debhelper-compat (= 12),
                dh-golang,
-               golang-any
+               golang-1.21-go
 Standards-Version: 4.5.0
 Vcs-Browser: https://code.launchpad.net/~ubuntu-core-dev/+git/google-guest-agent
 Vcs-Git: https://git.launchpad.net/~ubuntu-core-dev/+git/google-guest-agent -b ubuntu/master
