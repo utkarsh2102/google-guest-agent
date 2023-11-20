@@ -1,6 +1,7 @@
 google-guest-agent (20231004.02-0ubuntu1~23.04.1) lunar; urgency=medium
 
   * No-change rebuild for Lunar.
+  * Use Golang 1.21 as requested by Google.
 
  -- Utkarsh Gupta <utkarsh@ubuntu.com>  Mon, 20 Nov 2023 13:56:11 +0530
 
