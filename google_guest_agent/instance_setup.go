@@ -1,25 +1,23 @@
-//  Copyright 2019 Google Inc. All Rights Reserved.
-//
-//  Licensed under the Apache License, Version 2.0 (the "License");
-//  you may not use this file except in compliance with the License.
-//  You may obtain a copy of the License at
-//
-//      http://www.apache.org/licenses/LICENSE-2.0
-//
-//  Unless required by applicable law or agreed to in writing, software
-//  distributed under the License is distributed on an "AS IS" BASIS,
-//  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-//  See the License for the specific language governing permissions and
-//  limitations under the License.
+// Copyright 2019 Google LLC
+
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+
+//     https://www.apache.org/licenses/LICENSE-2.0
+
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
 package main
 
 import (
 	"context"
 	"fmt"
-	"io/ioutil"
 	"net"
-	"net/http"
 	"os"
 	"os/exec"
 	"runtime"
@@ -27,6 +25,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/GoogleCloudPlatform/guest-agent/google_guest_agent/cfg"
+	"github.com/GoogleCloudPlatform/guest-agent/google_guest_agent/run"
 	"github.com/GoogleCloudPlatform/guest-logging-go/logger"
 	"github.com/go-ini/ini"
 )
@@ -89,6 +89,7 @@ func agentInit(ctx context.Context) {
 	//  - Run `google_optimize_local_ssd` script.
 	//  - Run `google_set_multiqueue` script.
 	// TODO incorporate these scripts into the agent. liamh@12-11-19
+	config := cfg.Get()
 
 	if runtime.GOOS == "windows" {
 		// Indefinitely retry to set up required MDS route.
@@ -101,22 +102,33 @@ func agentInit(ctx context.Context) {
 		}
 	} else {
 		// Linux instance setup.
-		defer runCmd(exec.Command("systemd-notify", "--ready"))
+		defer run.Quiet(ctx, "systemd-notify", "--ready")
 		defer logger.Debugf("notify systemd")
 
-		if config.Section("Snapshots").Key("enabled").MustBool(false) {
+		if config.Snapshots.Enabled {
 			logger.Infof("Snapshot listener enabled")
-			snapshotServiceIP := config.Section("Snapshots").Key("snapshot_service_ip").MustString("169.254.169.254")
-			snapshotServicePort := config.Section("Snapshots").Key("snapshot_service_port").MustInt(8081)
-			startSnapshotListener(snapshotServiceIP, snapshotServicePort)
+			snapshotServiceIP := config.Snapshots.SnapshotServiceIP
+			snapshotServicePort := config.Snapshots.SnapshotServicePort
+			timeoutInSeconds := config.Snapshots.TimeoutInSeconds
+			startSnapshotListener(ctx, snapshotServiceIP, snapshotServicePort, timeoutInSeconds)
+		}
+
+		scripts := []struct {
+			enabled bool
+			script  string
+		}{
+			{config.InstanceSetup.OptimizeLocalSSD, "optimize_local_ssd"},
+			{config.InstanceSetup.SetMultiqueue, "set_multiqueue"},
 		}
 
 		// These scripts are run regardless of metadata/network access and config options.
-		for _, script := range []string{"optimize_local_ssd", "set_multiqueue"} {
-			if config.Section("InstanceSetup").Key(script).MustBool(true) {
-				if err := runCmd(exec.Command("google_" + script)); err != nil {
-					logger.Warningf("Failed to run %q script: %v", "google_"+script, err)
-				}
+		for _, curr := range scripts {
+			if !curr.enabled {
+				continue
+			}
+
+			if err := run.Quiet(ctx, "google_"+curr.script); err != nil {
+				logger.Warningf("Failed to run %q script: %v", "google_"+curr.script, err)
 			}
 		}
 
@@ -131,7 +143,7 @@ func agentInit(ctx context.Context) {
 		}
 
 		// Allow users to opt out of below instance setup actions.
-		if !config.Section("InstanceSetup").Key("network_enabled").MustBool(true) {
+		if !config.InstanceSetup.NetworkEnabled {
 			logger.Infof("InstanceSetup.network_enabled is false, skipping setup actions that require metadata")
 			return
 		}
@@ -142,14 +154,13 @@ func agentInit(ctx context.Context) {
 		// TODO: split agentInit into needs-network and no-network functions.
 		for newMetadata == nil {
 			logger.Debugf("populate first time metadata...")
-			newMetadata, _ = getMetadata(ctx, false)
-			time.Sleep(1 * time.Second)
+			newMetadata, _ = mdsClient.Get(ctx)
 		}
 
 		// Disable overcommit accounting; e2 instances only.
 		parts := strings.Split(newMetadata.Instance.MachineType, "/")
 		if strings.HasPrefix(parts[len(parts)-1], "e2-") {
-			if err := runCmd(exec.Command("sysctl", "vm.overcommit_memory=1")); err != nil {
+			if err := run.Quiet(ctx, "sysctl", "vm.overcommit_memory=1"); err != nil {
 				logger.Warningf("Failed to run 'sysctl vm.overcommit_memory=1': %v", err)
 			}
 		}
@@ -157,29 +168,29 @@ func agentInit(ctx context.Context) {
 		// Check if instance ID has changed, and if so, consider this
 		// the first boot of the instance.
 		// TODO Also do this for windows. liamh@13-11-2019
-		instanceIDFile := config.Section("Instance").Key("instance_id_dir").MustString("/etc") + "/google_instance_id"
-		instanceID, err := ioutil.ReadFile(instanceIDFile)
+		instanceIDFile := config.Instance.InstanceIDDir
+		instanceID, err := os.ReadFile(instanceIDFile)
 		if err != nil && !os.IsNotExist(err) {
 			logger.Warningf("Not running first-boot actions, error reading instance ID: %v", err)
 		} else {
 			if string(instanceID) == "" {
 				// If the file didn't exist or was empty, try legacy key from instance configs.
-				instanceID = []byte(config.Section("Instance").Key("instance_id").String())
+				instanceID = []byte(config.Instance.InstanceID)
 
 				// Write instance ID to file for next time before moving on.
 				towrite := fmt.Sprintf("%s\n", newMetadata.Instance.ID.String())
-				if err := ioutil.WriteFile(instanceIDFile, []byte(towrite), 0644); err != nil {
+				if err := os.WriteFile(instanceIDFile, []byte(towrite), 0644); err != nil {
 					logger.Warningf("Failed to write instance ID file: %v", err)
 				}
 			}
 			if newMetadata.Instance.ID.String() != strings.TrimSpace(string(instanceID)) {
 				logger.Infof("Instance ID changed, running first-boot actions")
-				if config.Section("InstanceSetup").Key("set_host_keys").MustBool(true) {
-					if err := generateSSHKeys(); err != nil {
+				if config.InstanceSetup.SetHostKeys {
+					if err := generateSSHKeys(ctx); err != nil {
 						logger.Warningf("Failed to generate SSH keys: %v", err)
 					}
 				}
-				if config.Section("InstanceSetup").Key("set_boto_config").MustBool(true) {
+				if config.InstanceSetup.SetBotoConfig {
 					if err := generateBotoConfig(); err != nil {
 						logger.Warningf("Failed to create boto.cfg: %v", err)
 					}
@@ -187,17 +198,17 @@ func agentInit(ctx context.Context) {
 
 				// Write instance ID to file.
 				towrite := fmt.Sprintf("%s\n", newMetadata.Instance.ID.String())
-				if err := ioutil.WriteFile(instanceIDFile, []byte(towrite), 0644); err != nil {
+				if err := os.WriteFile(instanceIDFile, []byte(towrite), 0644); err != nil {
 					logger.Warningf("Failed to write instance ID file: %v", err)
 				}
 			}
 		}
-
 	}
 }
 
-func generateSSHKeys() error {
-	hostKeyDir := config.Section("InstanceSetup").Key("host_key_dir").MustString("/etc/ssh")
+func generateSSHKeys(ctx context.Context) error {
+	config := cfg.Get()
+	hostKeyDir := config.InstanceSetup.HostKeyDir
 	dir, err := os.Open(hostKeyDir)
 	if err != nil {
 		return err
@@ -224,7 +235,7 @@ func generateSSHKeys() error {
 	}
 
 	// List keys we should generate, according to the config.
-	configKeys := config.Section("InstanceSetup").Key("host_key_types").MustString("ecdsa,ed25519,rsa")
+	configKeys := config.InstanceSetup.HostKeyTypes
 	for _, keytype := range strings.Split(configKeys, ",") {
 		keytypes[keytype] = true
 	}
@@ -232,7 +243,7 @@ func generateSSHKeys() error {
 	// Generate new keys and upload to guest attributes.
 	for keytype := range keytypes {
 		keyfile := fmt.Sprintf("%s/ssh_host_%s_key", hostKeyDir, keytype)
-		if err := runCmd(exec.Command("ssh-keygen", "-t", keytype, "-f", keyfile+".temp", "-N", "", "-q")); err != nil {
+		if err := run.Quiet(ctx, "ssh-keygen", "-t", keytype, "-f", keyfile+".temp", "-N", "", "-q"); err != nil {
 			logger.Warningf("Failed to generate SSH host key %q: %v", keyfile, err)
 			continue
 		}
@@ -252,20 +263,27 @@ func generateSSHKeys() error {
 			logger.Errorf("Failed to overwrite %q: %v", keyfile+".pub", err)
 			continue
 		}
-		pubKey, err := ioutil.ReadFile(keyfile + ".pub")
+		pubKey, err := os.ReadFile(keyfile + ".pub")
 		if err != nil {
 			logger.Errorf("Can't read %s public key: %v", keytype, err)
 			continue
 		}
 		if vals := strings.Split(string(pubKey), " "); len(vals) >= 2 {
-			if err := writeGuestAttributes("hostkeys/"+vals[0], vals[1]); err != nil {
+			if err := mdsClient.WriteGuestAttributes(ctx, "hostkeys/"+vals[0], vals[1]); err != nil {
 				logger.Errorf("Failed to upload %s key to guest attributes: %v", keytype, err)
 			}
 		} else {
 			logger.Warningf("Generated key is malformed, not uploading")
 		}
 	}
-	runCmd(exec.Command("restorecon", "-FR", hostKeyDir))
+
+	_, err = exec.LookPath("restorecon")
+	if err == nil {
+		if err := run.Quiet(ctx, "restorecon", "-FR", hostKeyDir); err != nil {
+			return fmt.Errorf("failed to restore SELinux context for: %s", hostKeyDir)
+		}
+	}
+
 	return nil
 }
 
@@ -280,20 +298,6 @@ func generateBotoConfig() error {
 	botoCfg.Section("GoogleCompute").Key("service_account").SetValue("default")
 
 	return botoCfg.SaveTo(path)
-}
-
-func writeGuestAttributes(key, value string) error {
-	logger.Debugf("write guest attribute %q", key)
-	client := &http.Client{Timeout: defaultTimeout}
-	finalURL := metadataURL + "instance/guest-attributes/" + key
-	req, err := http.NewRequest("PUT", finalURL, strings.NewReader(value))
-	if err != nil {
-		return err
-	}
-	req.Header.Add("Metadata-Flavor", "Google")
-
-	_, err = client.Do(req)
-	return err
 }
 
 func setIOScheduler() error {
