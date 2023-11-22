@@ -1,3 +1,10 @@
+google-guest-agent (20231004.02-0ubuntu1~16.04.1) xenial; urgency=medium
+
+  * No-change rebuild for Xenial.
+  * Use Golang 1.21 as requested by Google.
+
+ -- Utkarsh Gupta <utkarsh@ubuntu.com>  Wed, 22 Nov 2023 11:09:42 +0530
+
 google-guest-agent (20231004.02-0ubuntu1) noble; urgency=medium
 
   * New upstream version 20231004.02. (LP: #2040945)
