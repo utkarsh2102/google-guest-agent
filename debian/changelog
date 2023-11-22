@@ -1,3 +1,9 @@
+google-guest-agent (20231004.02-0ubuntu1~18.04.2) bionic; urgency=medium
+
+  * Use dh-golang >= 1.34.3 for building g-g-a.
+
+ -- Utkarsh Gupta <utkarsh@ubuntu.com>  Wed, 22 Nov 2023 18:57:31 +0000
+
 google-guest-agent (20231004.02-0ubuntu1~18.04.1) bionic; urgency=medium
 
   * No-change rebuild for Bionic.
