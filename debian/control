@@ -17,7 +17,8 @@ XS-Go-Import-Path: github.com/GoogleCloudPlatform/guest-agent
 Package: google-guest-agent
 Architecture: any
 Depends: ${misc:Depends},
-         ${shlibs:Depends}
+         ${shlibs:Depends},
+         google-compute-engine-oslogin (>= 1:20231003)
 Built-Using: ${misc:Built-Using}
 Breaks: gce-compute-image-packages (<< 20191115),
         python3-google-compute-engine
