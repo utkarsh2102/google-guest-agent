@@ -1,6 +1,5 @@
 Source: google-guest-agent
 Maintainer: Ubuntu Developers <ubuntu-devel-discuss@lists.ubuntu.com>
-Uploaders: Balint Reczey <rbalint@ubuntu.com>
 Section: devel
 Testsuite: autopkgtest-pkg-go
 Priority: optional
