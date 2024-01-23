@@ -7,8 +7,8 @@ Build-Depends: debhelper-compat (= 12),
                dh-golang,
                golang-any
 Standards-Version: 4.5.0
-Vcs-Browser: https://code.launchpad.net/~ubuntu-core-dev/+git/google-guest-agent
-Vcs-Git: https://git.launchpad.net/~ubuntu-core-dev/+git/google-guest-agent -b ubuntu/master
+Vcs-Browser: https://code.launchpad.net/~cloud-images/cloud-images/+git/google-guest-agent
+Vcs-Git: https://git.launchpad.net/~cloud-images/cloud-images/+git/google-guest-agent/ -b ubuntu/master
 Homepage: https://github.com/GoogleCloudPlatform/guest-agent
 Rules-Requires-Root: no
 XS-Go-Import-Path: github.com/GoogleCloudPlatform/guest-agent
