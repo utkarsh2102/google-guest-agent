@@ -25,8 +25,10 @@ import (
 	"strings"
 	"time"
 
+	"github.com/GoogleCloudPlatform/guest-agent/google_guest_agent/agentcrypto"
 	"github.com/GoogleCloudPlatform/guest-agent/google_guest_agent/cfg"
 	"github.com/GoogleCloudPlatform/guest-agent/google_guest_agent/run"
+	"github.com/GoogleCloudPlatform/guest-agent/google_guest_agent/scheduler"
 	"github.com/GoogleCloudPlatform/guest-logging-go/logger"
 	"github.com/go-ini/ini"
 )
@@ -148,13 +150,14 @@ func agentInit(ctx context.Context) {
 			return
 		}
 
-		// The below actions require metadata to be set, so if it
-		// hasn't yet been set, wait on it here. In instances without
-		// network access, this will become an indefinite wait.
-		// TODO: split agentInit into needs-network and no-network functions.
-		for newMetadata == nil {
-			logger.Debugf("populate first time metadata...")
-			newMetadata, _ = mdsClient.Get(ctx)
+		if newMetadata == nil {
+			var err error
+			logger.Debugf("populate metadata for the first time...")
+			newMetadata, err = mdsClient.Get(ctx)
+			if err != nil {
+				logger.Errorf("Failed to reach MDS(all retries exhausted): %+v", err)
+				os.Exit(1)
+			}
 		}
 
 		// Disable overcommit accounting; e2 instances only.
@@ -203,6 +206,14 @@ func agentInit(ctx context.Context) {
 				}
 			}
 		}
+	}
+	// Schedules jobs that need to be started before notifying systemd Agent process has started.
+	// We want to generate MDS credentials as early as possible so that any process in the Guest can
+	// use them. Processes may depend on the Guest Agent at startup to ensure that the credentials are
+	// available for use. By generating the credentials before notifying the systemd, we ensure that
+	// they are generated for any process that depends on the Guest Agent.
+	if config.MDS.MTLSBootstrappingEnabled {
+		scheduler.ScheduleJobs(ctx, []scheduler.Job{agentcrypto.New()}, true)
 	}
 }
 

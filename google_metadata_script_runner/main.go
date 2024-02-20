@@ -30,6 +30,7 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"regexp"
 	"runtime"
@@ -37,31 +38,28 @@ import (
 	"time"
 
 	"cloud.google.com/go/storage"
+	"github.com/GoogleCloudPlatform/guest-agent/google_guest_agent/cfg"
+	"github.com/GoogleCloudPlatform/guest-agent/metadata"
 	"github.com/GoogleCloudPlatform/guest-agent/utils"
 	"github.com/GoogleCloudPlatform/guest-logging-go/logger"
-	"github.com/go-ini/ini"
+)
+
+const (
+	storageURL     = "storage.googleapis.com"
+	bucket         = "([a-z0-9][-_.a-z0-9]*)"
+	object         = "(.+)"
+	defaultTimeout = 20 * time.Second
 )
 
 var (
-	programName    = "GCEMetadataScripts"
-	version        = "dev"
-	metadataURL    = "http://169.254.169.254/computeMetadata/v1"
-	metadataHang   = "/?recursive=true&alt=json&timeout_sec=10&last_etag=NONE"
-	defaultTimeout = 20 * time.Second
+	programName    = path.Base(os.Args[0])
 	powerShellArgs = []string{"-NoProfile", "-NoLogo", "-ExecutionPolicy", "Unrestricted", "-File"}
 	errUsage       = fmt.Errorf("no valid arguments specified. Specify one of \"startup\", \"shutdown\" or \"specialize\"")
-	config         *ini.File
-
-	storageURL = "storage.googleapis.com"
-
-	bucket = `([a-z0-9][-_.a-z0-9]*)`
-	object = `(.+)`
 
 	// Many of the Google Storage URLs are supported below.
 	// It is preferred that customers specify their object using
 	// its gs://<bucket>/<object> URL.
-	bucketRegex = regexp.MustCompile(fmt.Sprintf(`^gs://%s/?$`, bucket))
-	gsRegex     = regexp.MustCompile(fmt.Sprintf(`^gs://%s/%s$`, bucket, object))
+	gsRegex = regexp.MustCompile(fmt.Sprintf(`^gs://%s/%s$`, bucket, object))
 
 	// Check for the Google Storage URLs:
 	// http://<bucket>.storage.googleapis.com/<object>
@@ -82,12 +80,14 @@ var (
 	gsHTTPRegex3 = regexp.MustCompile(fmt.Sprintf(`^http[s]?://(?:commondata)?storage\.googleapis\.com/%s/%s$`, bucket, object))
 
 	testStorageClient *storage.Client
+
+	client  metadata.MDSClientInterface
+	version string
 )
 
-const (
-	winConfigPath = `C:\Program Files\Google\Compute Engine\instance_configs.cfg`
-	configPath    = `/etc/default/instance_configs.cfg`
-)
+func init() {
+	client = metadata.New()
+}
 
 func newStorageClient(ctx context.Context) (*storage.Client, error) {
 	if testStorageClient != nil {
@@ -182,16 +182,16 @@ func parseGCS(path string) (string, string) {
 	return "", ""
 }
 
-func getMetadataKey(key string) (string, error) {
-	md, err := getMetadata(key, false)
+func getMetadataKey(ctx context.Context, key string) (string, error) {
+	md, err := getMetadata(ctx, key, false)
 	if err != nil {
 		return "", err
 	}
 	return string(md), nil
 }
 
-func getMetadataAttributes(key string) (map[string]string, error) {
-	md, err := getMetadata(key, true)
+func getMetadataAttributes(ctx context.Context, key string) (map[string]string, error) {
+	md, err := getMetadata(ctx, key, true)
 	if err != nil {
 		return nil, err
 	}
@@ -199,43 +199,21 @@ func getMetadataAttributes(key string) (map[string]string, error) {
 	return att, json.Unmarshal(md, &att)
 }
 
-func getMetadata(key string, recurse bool) ([]byte, error) {
-	client := &http.Client{
-		Timeout: defaultTimeout,
-	}
+func getMetadata(ctx context.Context, key string, recurse bool) ([]byte, error) {
+	var resp string
+	var err error
 
-	url := metadataURL + key
 	if recurse {
-		url += metadataHang
+		resp, err = client.GetKeyRecursive(ctx, key)
+	} else {
+		resp, err = client.GetKey(ctx, key, nil)
 	}
-	req, err := http.NewRequest("GET", url, nil)
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Add("Metadata-Flavor", "Google")
 
-	var res *http.Response
-	// Retry forever, increase sleep between retries (up to 5 times) in order
-	// to wait for slow network initialization.
-	var rt time.Duration
-	for i := 1; ; i++ {
-		res, err = client.Do(req)
-		if err == nil {
-			break
-		}
-		if i < 6 {
-			rt = time.Duration(3*i) * time.Second
-		}
-		logger.Errorf("error connecting to metadata server, retrying in %s, error: %v", rt, err)
-		time.Sleep(rt)
-	}
-	defer res.Body.Close()
-
-	md, err := io.ReadAll(res.Body)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("unable to get %q from MDS, with recursive flag set to %t: %w", key, recurse, err)
 	}
-	return md, nil
+
+	return []byte(resp), nil
 }
 
 func normalizeFilePathForWindows(filePath string, metadataKey string, gcsScriptURL *url.URL) string {
@@ -287,7 +265,7 @@ func setupAndRunScript(ctx context.Context, metadataKey string, value string) er
 	}
 
 	// Make temp directory.
-	tmpDir, err := os.MkdirTemp(config.Section("MetadataScripts").Key("run_dir").String(), "metadata-scripts")
+	tmpDir, err := os.MkdirTemp(cfg.Get().MetadataScripts.RunDir, "metadata-scripts")
 	if err != nil {
 		return err
 	}
@@ -297,7 +275,10 @@ func setupAndRunScript(ctx context.Context, metadataKey string, value string) er
 	if runtime.GOOS == "windows" {
 		tmpFile = normalizeFilePathForWindows(tmpFile, metadataKey, gcsScriptURL)
 	}
-	writeScriptToFile(ctx, value, tmpFile, gcsScriptURL)
+
+	if err := writeScriptToFile(ctx, value, tmpFile, gcsScriptURL); err != nil {
+		return fmt.Errorf("unable to write script to file: %v", err)
+	}
 
 	return runScript(tmpFile, metadataKey)
 }
@@ -311,7 +292,7 @@ func runScript(filePath string, metadataKey string) error {
 		if runtime.GOOS == "windows" {
 			cmd = exec.Command(filePath)
 		} else {
-			cmd = exec.Command(config.Section("MetadataScripts").Key("default_shell").MustString("/bin/bash"), "-c", filePath)
+			cmd = exec.Command(cfg.Get().MetadataScripts.DefaultShell, "-c", filePath)
 		}
 	}
 	return runCmd(cmd, metadataKey)
@@ -360,12 +341,27 @@ func getWantedKeys(args []string, os string) ([]string, error) {
 	switch prefix {
 	case "specialize":
 		prefix = "sysprep-specialize"
-	case "startup", "shutdown":
+	case "startup":
 		if os == "windows" {
 			prefix = "windows-" + prefix
+			if !cfg.Get().MetadataScripts.StartupWindows {
+				return nil, fmt.Errorf("windows startup scripts disabled in instance config")
+			}
+		} else {
+			if !cfg.Get().MetadataScripts.Startup {
+				return nil, fmt.Errorf("startup scripts disabled in instance config")
+			}
 		}
-		if !config.Section("MetadataScripts").Key(prefix).MustBool(true) {
-			return nil, fmt.Errorf("%s scripts disabled in instance config", prefix)
+	case "shutdown":
+		if os == "windows" {
+			prefix = "windows-" + prefix
+			if !cfg.Get().MetadataScripts.ShutdownWindows {
+				return nil, fmt.Errorf("windows shutdown scripts disabled in instance config")
+			}
+		} else {
+			if !cfg.Get().MetadataScripts.Shutdown {
+				return nil, fmt.Errorf("shutdown scripts disabled in instance config")
+			}
 		}
 	default:
 		return nil, errUsage
@@ -401,9 +397,9 @@ func parseMetadata(md map[string]string, wanted []string) map[string]string {
 }
 
 // getExistingKeys returns the wanted keys that are set in metadata.
-func getExistingKeys(wanted []string) (map[string]string, error) {
+func getExistingKeys(ctx context.Context, wanted []string) (map[string]string, error) {
 	for _, attrs := range []string{"/instance/attributes", "/project/attributes"} {
-		md, err := getMetadataAttributes(attrs)
+		md, err := getMetadataAttributes(ctx, attrs)
 		if err != nil {
 			return nil, err
 		}
@@ -420,23 +416,12 @@ func logFormatWindows(e logger.LogEntry) string {
 	return fmt.Sprintf("%s %s: %s", now, programName, e.Message)
 }
 
-func parseConfig(file string) (*ini.File, error) {
-	// Priority: file.cfg, file.cfg.distro, file.cfg.template
-	cfg, err := ini.LoadSources(ini.LoadOptions{Loose: true, Insensitive: true}, file, file+".distro", file+".template")
-	if err != nil {
-		return nil, err
-	}
-	return cfg, nil
-}
-
 func main() {
 	ctx := context.Background()
 
 	opts := logger.LogOpts{LoggerName: programName}
 
-	cfgfile := configPath
 	if runtime.GOOS == "windows" {
-		cfgfile = winConfigPath
 		opts.Writers = []io.Writer{&utils.SerialPort{Port: "COM1"}, os.Stdout}
 		opts.FormatFunction = logFormatWindows
 	} else {
@@ -447,9 +432,9 @@ func main() {
 	}
 
 	var err error
-	config, err = parseConfig(cfgfile)
-	if err != nil && !os.IsNotExist(err) {
-		fmt.Printf("Error parsing instance config %s: %s\n", cfgfile, err.Error())
+	if err := cfg.Load(nil); err != nil {
+		fmt.Fprintf(os.Stderr, "Failed to load instance configuration: %+v", err)
+		os.Exit(1)
 	}
 
 	// The keys to check vary based on the argument and the OS. Also functions to validate arguments.
@@ -459,7 +444,7 @@ func main() {
 		os.Exit(2)
 	}
 
-	projectID, err := getMetadataKey("/project/project-id")
+	projectID, err := getMetadataKey(ctx, "/project/project-id")
 	if err == nil {
 		opts.ProjectName = projectID
 	}
@@ -468,7 +453,7 @@ func main() {
 
 	logger.Infof("Starting %s scripts (version %s).", os.Args[1], version)
 
-	scripts, err := getExistingKeys(wantedKeys)
+	scripts, err := getExistingKeys(ctx, wantedKeys)
 	if err != nil {
 		logger.Fatalf(err.Error())
 	}
@@ -485,7 +470,7 @@ func main() {
 		}
 		logger.Infof("Found %s in metadata.", wantedKey)
 		if err := setupAndRunScript(ctx, wantedKey, value); err != nil {
-			logger.Infof("%s %s", wantedKey, err)
+			logger.Warningf("Script %q failed with error: %v", wantedKey, err)
 			continue
 		}
 		logger.Infof("%s exit status 0", wantedKey)

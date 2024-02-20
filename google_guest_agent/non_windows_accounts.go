@@ -23,6 +23,7 @@ import (
 	"os/exec"
 	"path"
 	"runtime"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -202,6 +203,7 @@ var badSSHKeys []string
 // user:ssh-rsa [KEY_VALUE] [USERNAME]
 // user:ssh-rsa [KEY_VALUE]
 // user:ssh-rsa [KEY_VALUE] google-ssh {"userName":"[USERNAME]","expireOn":"[EXPIRE_TIME]"}
+// user:[KEY_OPTIONS] ssh-rsa [KEY_VALUE]
 func getUserKeys(mdkeys []string) map[string][]string {
 	mdKeyMap := make(map[string][]string)
 	for i := 0; i < len(mdkeys); i++ {
@@ -213,7 +215,7 @@ func getUserKeys(mdkeys []string) map[string][]string {
 			}
 
 			if err != nil {
-				if !utils.ContainsString(trimmedKey, badSSHKeys) {
+				if !slices.Contains(badSSHKeys, trimmedKey) {
 					logger.Errorf("%s: %s", err.Error(), trimmedKey)
 					badSSHKeys = append(badSSHKeys, trimmedKey)
 				}
