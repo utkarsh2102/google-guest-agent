@@ -14,7 +14,9 @@
 
 package cfg
 
-import "testing"
+import (
+	"testing"
+)
 
 func TestLoad(t *testing.T) {
 	if err := Load(nil); err != nil {
