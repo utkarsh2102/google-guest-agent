@@ -20,12 +20,15 @@ import (
 	"os"
 	"os/exec"
 	"runtime"
+	"slices"
 	"strings"
 	"time"
 
 	"github.com/GoogleCloudPlatform/guest-agent/google_guest_agent/cfg"
+	"github.com/GoogleCloudPlatform/guest-agent/google_guest_agent/events"
 	"github.com/GoogleCloudPlatform/guest-agent/google_guest_agent/events/sshtrustedca"
 	"github.com/GoogleCloudPlatform/guest-agent/google_guest_agent/run"
+	"github.com/GoogleCloudPlatform/guest-agent/google_guest_agent/sshca"
 	"github.com/GoogleCloudPlatform/guest-agent/metadata"
 	"github.com/GoogleCloudPlatform/guest-logging-go/logger"
 )
@@ -34,6 +37,14 @@ var (
 	googleComment    = "# Added by Google Compute Engine OS Login."
 	googleBlockStart = "#### Google OS Login control. Do not edit this section. ####"
 	googleBlockEnd   = "#### End Google OS Login control section. ####"
+	trustedCAWatcher events.Watcher
+
+	// deprecatedConfigDirectives contains a list of configuration directives (or lines)
+	// that we no longer support and should not be considered for updated versions of a
+	// given configuration file.
+	deprecatedConfigDirectives = map[string][]string{
+		"/etc/pam.d/su": []string{"account    [success=bad ignore=ignore] pam_oslogin_login.so"},
+	}
 )
 
 type osloginMgr struct{}
@@ -65,6 +76,35 @@ func getOSLoginEnabled(md *metadata.Descriptor) (bool, bool, bool) {
 	return enable, twofactor, skey
 }
 
+func enableDisableOSLoginCertAuth(ctx context.Context) error {
+	if newMetadata == nil {
+		logger.Infof("Could not enable/disable OSLogin Cert Auth, metadata is not initialized.")
+		return nil
+	}
+
+	eventManager := events.Get()
+	osLoginEnabled, _, _ := getOSLoginEnabled(newMetadata)
+	if osLoginEnabled {
+		if trustedCAWatcher == nil {
+			trustedCAWatcher = sshtrustedca.New(sshtrustedca.DefaultPipePath)
+			if err := eventManager.AddWatcher(ctx, trustedCAWatcher); err != nil {
+				return err
+			}
+			sshca.Init()
+		}
+	} else {
+		if trustedCAWatcher != nil {
+			if err := eventManager.RemoveWatcher(ctx, trustedCAWatcher); err != nil {
+				return err
+			}
+			sshca.Close()
+			trustedCAWatcher = nil
+		}
+	}
+
+	return nil
+}
+
 func (o *osloginMgr) Diff(ctx context.Context) (bool, error) {
 	oldEnable, oldTwoFactor, oldSkey := getOSLoginEnabled(oldMetadata)
 	enable, twofactor, skey := getOSLoginEnabled(newMetadata)
@@ -88,6 +128,8 @@ func (o *osloginMgr) Set(ctx context.Context) error {
 	// metadata-based SSH keys.
 	oldEnable, _, _ := getOSLoginEnabled(oldMetadata)
 	enable, twofactor, skey := getOSLoginEnabled(newMetadata)
+
+	cleanupDeprecatedDirectives()
 
 	if enable && !oldEnable {
 		logger.Infof("Enabling OS Login")
@@ -154,6 +196,55 @@ func (o *osloginMgr) Set(ctx context.Context) error {
 	}
 
 	return nil
+}
+
+func cleanupDeprecatedLines(fpath string, directives []string) error {
+	// If the file doesn't exist don't even try updating it.
+	stat, err := os.Stat(fpath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("failed to stat config file: %+v", err)
+	}
+
+	data, err := os.ReadFile(fpath)
+	if err != nil {
+		return fmt.Errorf("failed to read file: %+v", err)
+	}
+
+	var updatedLines []string
+	var totalLines int
+
+	for _, line := range strings.Split(string(data), "\n") {
+		if !slices.Contains(directives, line) {
+			updatedLines = append(updatedLines, line)
+		}
+		totalLines++
+	}
+
+	// Don't attempt to update the config file if no lines werer removed/avoided.
+	if totalLines == len(updatedLines) {
+		return nil
+	}
+
+	err = os.WriteFile(fpath, []byte(strings.Join(updatedLines, "\n")), stat.Mode())
+	if err != nil {
+		return fmt.Errorf("failed to update deprecated configuration directives: %+v", err)
+	}
+
+	return nil
+}
+
+// cleanupDeprecatedDirectives checks if a given configuration line is an old
+// configuration that was deprecated and we should not consider it for the updated
+// version.
+func cleanupDeprecatedDirectives() {
+	for k, v := range deprecatedConfigDirectives {
+		if err := cleanupDeprecatedLines(k, v); err != nil {
+			logger.Errorf("failed to clean up deprecated directives: %+v", err)
+		}
+	}
 }
 
 func filterGoogleLines(contents string) []string {
