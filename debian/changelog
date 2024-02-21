@@ -1,3 +1,11 @@
+google-guest-agent (20240213.00-0ubuntu1) noble; urgency=medium
+
+  * Update code to new upstream version/tag 20240213.00 (LP: #2054484)
+  * d/extra/vendor: Update the vendored dependencies
+  * New d/source/include-binaries file
+
+ -- Chloé 'kajiya' Smith <chloe.smith@canonical.com>  Wed, 21 Feb 2024 00:25:47 +0000
+
 google-guest-agent (20231004.02-0ubuntu3) noble; urgency=medium
 
   * d/control: Fix dependency version of `google-compute-engine-oslogin`
