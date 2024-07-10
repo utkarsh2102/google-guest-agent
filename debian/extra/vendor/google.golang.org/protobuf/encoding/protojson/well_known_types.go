@@ -328,6 +328,10 @@ func (d decoder) skipJSONValue() error {
 				if err := d.skipJSONValue(); err != nil {
 					return err
 				}
+			case json.EOF:
+				// This can only happen if there's a bug in Decoder.Read.
+				// Avoid an infinite loop if this does happen.
+				return errors.New("unexpected EOF")
 			}
 		}
 
@@ -341,6 +345,10 @@ func (d decoder) skipJSONValue() error {
 			case json.ArrayClose:
 				d.Read()
 				return nil
+			case json.EOF:
+				// This can only happen if there's a bug in Decoder.Read.
+				// Avoid an infinite loop if this does happen.
+				return errors.New("unexpected EOF")
 			default:
 				// Skip array item.
 				if err := d.skipJSONValue(); err != nil {
@@ -348,6 +356,10 @@ func (d decoder) skipJSONValue() error {
 				}
 			}
 		}
+	case json.EOF:
+		// This can only happen if there's a bug in Decoder.Read.
+		// Avoid an infinite loop if this does happen.
+		return errors.New("unexpected EOF")
 	}
 	return nil
 }

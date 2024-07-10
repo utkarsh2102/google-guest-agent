@@ -1,3 +1,16 @@
+google-guest-agent (20240213.00-0ubuntu4) oracular; urgency=medium
+
+  * SECURITY UPDATE: Denial of service
+    - debian/extra/vendor/googgle.golang.org/protobuf was
+      patched with a backport of f01a588e5810b90996452eec4a28f22a0afae023
+      in files encoding/protojson/well_known_types.go,
+      internal/encoding/json/decode.go.
+    - debian/extra/vendor adding patches-applied and README.txt for
+      track/documentation propose about patches applied in vendored sources.
+    - CVE-2024-24786
+
+ -- Leonidas Da Silva Barbosa <leo.barbosa@canonical.com>  Wed, 12 Jun 2024 10:15:12 -0300
+
 google-guest-agent (20240213.00-0ubuntu3) noble; urgency=medium
 
   * No-change rebuild against Go 1.22.
