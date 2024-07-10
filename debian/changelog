@@ -1,3 +1,15 @@
+google-guest-agent (20240213.00-0ubuntu3) noble; urgency=medium
+
+  * No-change rebuild against Go 1.22.
+
+ -- Vladimir Petko <vladimir.petko@canonical.com>  Mon, 08 Apr 2024 14:53:33 +1200
+
+google-guest-agent (20240213.00-0ubuntu2) noble; urgency=medium
+
+  * No-change rebuild for CVE-2024-3094
+
+ -- William Grant <wgrant@ubuntu.com>  Mon, 01 Apr 2024 16:50:39 +1100
+
 google-guest-agent (20240213.00-0ubuntu1) noble; urgency=medium
 
   [ Utkarsh Gupta ]
