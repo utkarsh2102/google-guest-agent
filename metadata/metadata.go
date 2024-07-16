@@ -18,15 +18,16 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/GoogleCloudPlatform/guest-agent/retry"
 	"github.com/GoogleCloudPlatform/guest-logging-go/logger"
 )
 
@@ -134,11 +135,23 @@ type virtualClock struct {
 
 // Instance describes the metadata's instance attributes/keys.
 type Instance struct {
-	ID                json.Number
-	MachineType       string
-	Attributes        Attributes
+	// ID is the instance ID.
+	ID json.Number
+
+	// MachineType represents the instance's machine type.
+	MachineType string
+
+	// Attributes are the instance's attributes.
+	Attributes Attributes
+
+	// NetworkInterfaces contains all configured regular network interfaces (primary and secondary).
 	NetworkInterfaces []NetworkInterfaces
-	VirtualClock      virtualClock
+
+	// VlanNetworkInterfaces contains all the vLAN network interfaces.
+	VlanNetworkInterfaces []map[int]VlanInterface
+
+	// VirtualClock contains the drift-token attribute.
+	VirtualClock virtualClock
 }
 
 // NetworkInterfaces describes the instances network interfaces configurations.
@@ -149,6 +162,35 @@ type NetworkInterfaces struct {
 	IPAliases         []string
 	Mac               string
 	DHCPv6Refresh     string
+	MTU               int
+}
+
+// VlanInterface describes the instances vlan network interfaces configurations.
+type VlanInterface struct {
+	// Mac is the vLAN interface's mac address.
+	Mac string
+
+	// ParentInterface is the mds reference of the parent/physical interface i.e.:
+	// /computeMetadata/v1/instance/network-interfaces/0/
+	ParentInterface string
+
+	// Vlan is the vlan id.
+	Vlan int
+
+	// MTU is the vlan's MTU value.
+	MTU int
+
+	// IP is the vlan's ip address.
+	IP string
+
+	// IPv6 is the vlan's ipv6 address.
+	IPv6 []string
+
+	// Gateway is the vlan's gateway address.
+	Gateway string
+
+	// GatewayIPv6 is the vlan's IPv6 gateway address.
+	GatewayIPv6 string
 }
 
 // Project describes the projects instance's attributes.
@@ -165,6 +207,7 @@ type Attributes struct {
 	EnableWindowsSSH      *bool
 	TwoFactor             *bool
 	SecurityKey           *bool
+	RequireCerts          *bool
 	SSHKeys               []string
 	WindowsKeys           WindowsKeys
 	Diagnostics           string
@@ -198,6 +241,7 @@ func (a *Attributes) UnmarshalJSON(b []byte) error {
 		SSHKeys               string      `json:"ssh-keys"`
 		TwoFactor             string      `json:"enable-oslogin-2fa"`
 		SecurityKey           string      `json:"enable-oslogin-sk"`
+		RequireCerts          string      `json:"enable-oslogin-certificates"`
 		WindowsKeys           WindowsKeys `json:"windows-keys"`
 		WSFCAddresses         string      `json:"wsfc-addrs"`
 		WSFCAgentPort         string      `json:"wsfc-agent-port"`
@@ -248,6 +292,10 @@ func (a *Attributes) UnmarshalJSON(b []byte) error {
 	if err == nil {
 		a.SecurityKey = mkbool(value)
 	}
+	value, err = strconv.ParseBool(temp.RequireCerts)
+	if err == nil {
+		a.RequireCerts = mkbool(value)
+	}
 	value, err = strconv.ParseBool(temp.DisableTelemetry)
 	if err == nil {
 		a.DisableTelemetry = value
@@ -272,50 +320,55 @@ func (c *Client) updateEtag(resp *http.Response) bool {
 	return c.etag != oldEtag
 }
 
-func shouldRetry(resp *http.Response, err error) bool {
-	// If the context was canceled just return the error and don't retry.
-	if err != nil && errors.Is(err, context.Canceled) {
-		return false
+// MDSReqError represents custom error produced by HTTP requests made on MDS. It captures
+// error and HTTP response for inspecting status code.
+type MDSReqError struct {
+	status int
+	err    error
+}
+
+// Error implements method defined on error interface to transform custom type into error.
+func (m *MDSReqError) Error() string {
+	return fmt.Sprintf("request failed with status code: [%d], error: [%v]", m.status, m.err)
+}
+
+// shouldRetry method checks if MDSReqError is temporary and retriable or not.
+func shouldRetry(err error) bool {
+	e, ok := err.(*MDSReqError)
+	if !ok {
+		// Unknown error retry.
+		return true
 	}
 
 	// Known non-retriable status codes.
-	if resp != nil && resp.StatusCode == 404 {
-		return false
-	}
+	codes := []int{404}
 
-	return true
+	return !slices.Contains(codes, e.status)
 }
 
 func (c *Client) retry(ctx context.Context, cfg requestConfig) (string, error) {
-	var ferr error
-	for i := 1; i <= backoffAttempts; i++ {
+	policy := retry.Policy{MaxAttempts: backoffAttempts, Jitter: backoffDuration, BackoffFactor: 1, ShouldRetry: shouldRetry}
+
+	fn := func() (string, error) {
 		resp, err := c.do(ctx, cfg)
-		ferr = err
-		// Check if error is retriable, if not just return the error and don't retry.
-		if err != nil && !shouldRetry(resp, err) {
-			return "", err
-		}
-
-		// Apply the backoff strategy.
 		if err != nil {
-			logger.Debugf("Attempt %d: failed to connect to metadata server: %+v", i, err)
-			time.Sleep(time.Duration(i) * backoffDuration)
-			continue
+			statusCode := -1
+			if resp != nil {
+				statusCode = resp.StatusCode
+			}
+			return "", &MDSReqError{statusCode, err}
 		}
-
 		defer resp.Body.Close()
+
 		md, err := io.ReadAll(resp.Body)
 		if err != nil {
-			ferr = err
-			logger.Debugf("Attempt %d: failed to read metadata server response bytes: %+v", i, err)
-			time.Sleep(time.Duration(i) * backoffDuration)
-			continue
+			return "", fmt.Errorf("failed to read metadata server response bytes: %+v", err)
 		}
 
 		return string(md), nil
 	}
-	logger.Errorf("Exhausted %d retry attempts to connect to MDS, failed with an error: %+v", backoffAttempts, ferr)
-	return "", fmt.Errorf("reached max attempts to connect to metadata")
+
+	return retry.RunWithResponse(ctx, policy, fn)
 }
 
 // GetKey gets a specific metadata key.
@@ -454,10 +507,15 @@ func (c *Client) do(ctx context.Context, cfg requestConfig) (*http.Response, err
 		return resp, fmt.Errorf("error connecting to metadata server: %+v", err)
 	}
 
-	statusCodeMsg := "error connecting to metadata server, status code: %d"
-	switch resp.StatusCode {
-	case 404, 412:
-		return resp, fmt.Errorf(statusCodeMsg, resp.StatusCode)
+	if resp == nil {
+		return nil, fmt.Errorf("got nil response from metadata server")
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		defer resp.Body.Close()
+		// Ignore read error as we are returning original error and wrapping MDS error code.
+		r, _ := io.ReadAll(resp.Body)
+		return resp, fmt.Errorf("invalid response from metadata server, status code: %d, reason: %s", resp.StatusCode, string(r))
 	}
 
 	if cfg.hang {

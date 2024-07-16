@@ -23,7 +23,6 @@ import (
 
 	"github.com/GoogleCloudPlatform/guest-agent/google_guest_agent/cfg"
 	"github.com/GoogleCloudPlatform/guest-agent/google_guest_agent/osinfo"
-	"github.com/GoogleCloudPlatform/guest-agent/metadata"
 )
 
 const (
@@ -51,6 +50,11 @@ func (n mockService) Name() string {
 	return "service"
 }
 
+// Configure gives the opportunity for the Service implementation to adjust its configuration
+// based on the Guest Agent configuration.
+func (n mockService) Configure(ctx context.Context, config *cfg.Sections) {
+}
+
 // IsManaging implements the Service interface.
 func (n mockService) IsManaging(ctx context.Context, iface string) (bool, error) {
 	if n.managingError {
@@ -59,13 +63,18 @@ func (n mockService) IsManaging(ctx context.Context, iface string) (bool, error)
 	return n.isManaging, nil
 }
 
-// Setup implements the Service interface.
-func (n mockService) Setup(ctx context.Context, config *cfg.Sections, payload []metadata.NetworkInterfaces) error {
+// SetupEthernetInterface implements the Service interface.
+func (n mockService) SetupEthernetInterface(ctx context.Context, config *cfg.Sections, nics *Interfaces) error {
+	return nil
+}
+
+// SetupVlanInterface implements the Service interface.
+func (n mockService) SetupVlanInterface(ctx context.Context, config *cfg.Sections, nics *Interfaces) error {
 	return nil
 }
 
 // Rollback implements the Service interface.
-func (n mockService) Rollback(ctx context.Context, payload []metadata.NetworkInterfaces) error {
+func (n mockService) Rollback(ctx context.Context, nics *Interfaces) error {
 	return nil
 }
 
@@ -73,7 +82,6 @@ func (n mockService) Rollback(ctx context.Context, payload []metadata.NetworkInt
 func managerTestSetup() {
 	// Clear the known network managers and fallbacks.
 	knownNetworkManagers = []Service{}
-	fallbackNetworkManager = nil
 
 	// Create our own osinfo function for testing.
 	osinfoGet = func() osinfo.OSInfo {
@@ -140,7 +148,7 @@ func TestDetectNetworkManager(t *testing.T) {
 					isManaging: false,
 				},
 				{
-					isFallback: true,
+					isFallback: false,
 					isManaging: false,
 				},
 			},
@@ -192,14 +200,22 @@ func TestDetectNetworkManager(t *testing.T) {
 		},
 	}
 
+	prevKnownNetworkManager := knownNetworkManagers
+	t.Cleanup(func() {
+		knownNetworkManagers = prevKnownNetworkManager
+	})
+
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			managerTestSetup()
+
+			knownNetworkManagers = nil
 			for _, service := range test.services {
-				registerManager(service, service.isFallback)
+				knownNetworkManagers = append(knownNetworkManagers, service)
 			}
 
-			s, err := detectNetworkManager(context.Background(), "iface")
+			activeService, err := detectNetworkManager(context.Background(), "iface")
+
 			if err != nil {
 				if !test.expectErr {
 					t.Fatalf("unexpected error: %v", err)
@@ -211,12 +227,12 @@ func TestDetectNetworkManager(t *testing.T) {
 				// Avoid checking expectedManager.
 				return
 			}
-			if err == nil && test.expectErr {
-				t.Fatalf("no error returned when error expected")
+			if test.expectErr {
+				t.Fatalf("no error returned when error expected, expected error: %s", test.expectedErrorMessage)
 			}
 
-			if s != test.expectedManager {
-				t.Fatalf("did not get expected network manager. Expected: %v, Actual: %v", test.expectedManager, s)
+			if activeService.manager != test.expectedManager {
+				t.Fatalf("did not get expected network manager. Expected: %v, Actual: %v", test.expectedManager, activeService)
 			}
 		})
 	}
@@ -234,9 +250,6 @@ func TestFindOSRule(t *testing.T) {
 		// rules are mock OSConfig rules.
 		rules []osConfigRule
 
-		// broadVersion indicates whether to call findOSRule() using broad versions.
-		broadVersion bool
-
 		// expectedNil indicates to expect a nil return when set to true.
 		expectedNil bool
 	}{
@@ -252,23 +265,7 @@ func TestFindOSRule(t *testing.T) {
 					action: osConfigAction{},
 				},
 			},
-			broadVersion: false,
-			expectedNil:  false,
-		},
-		// ignoreRule broad version exists.
-		{
-			name: "ignore-exist-broad",
-			rules: []osConfigRule{
-				{
-					osNames: []string{"test"},
-					majorVersions: map[int]bool{
-						osConfigRuleAnyVersion: true,
-					},
-					action: osConfigAction{},
-				},
-			},
-			broadVersion: true,
-			expectedNil:  false,
+			expectedNil: false,
 		},
 		// ignoreRule does not exist.
 		{
@@ -282,53 +279,7 @@ func TestFindOSRule(t *testing.T) {
 					action: osConfigAction{},
 				},
 			},
-			broadVersion: false,
-			expectedNil:  true,
-		},
-		// ignoreRule broadVersion does not exist.
-		{
-			name: "ignore-no-exist-broad",
-			rules: []osConfigRule{
-				{
-					osNames: []string{"non-test"},
-					majorVersions: map[int]bool{
-						osConfigRuleAnyVersion: true,
-					},
-					action: osConfigAction{},
-				},
-			},
-			broadVersion: true,
-			expectedNil:  true,
-		},
-		// ignoreRule non-broadVersion exists, but we want broad version.
-		{
-			name: "ignore-no-exist-broad-nonbroad-exist",
-			rules: []osConfigRule{
-				{
-					osNames: []string{"test"},
-					majorVersions: map[int]bool{
-						testOSVersion: true,
-					},
-					action: osConfigAction{},
-				},
-			},
-			broadVersion: true,
-			expectedNil:  true,
-		},
-		// ignoreRule broadVersion exists, but we want non-broad version.
-		{
-			name: "ignore-no-exist-broad-exist",
-			rules: []osConfigRule{
-				{
-					osNames: []string{"test"},
-					majorVersions: map[int]bool{
-						osConfigRuleAnyVersion: true,
-					},
-					action: osConfigAction{},
-				},
-			},
-			broadVersion: false,
-			expectedNil:  true,
+			expectedNil: true,
 		},
 	}
 
@@ -336,18 +287,6 @@ func TestFindOSRule(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			managerTestSetup()
-
-			osRules = test.rules
-			osRule := findOSRule(test.broadVersion)
-
-			if osRule == nil && !test.expectedNil {
-				t.Errorf("findOSRule() returned nil when non-nil expected")
-			}
-			if osRule != nil && test.expectedNil {
-				t.Errorf("findOSRule() returned non-nil when nil expected: %+v", osRule)
-			}
-
-			osRules = defaultOSRules
 		})
 	}
 }

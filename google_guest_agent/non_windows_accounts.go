@@ -91,8 +91,8 @@ func (a *accountsMgr) Diff(ctx context.Context) (bool, error) {
 		}
 	}
 	// If we've just disabled OS Login.
-	oldOslogin, _, _ := getOSLoginEnabled(oldMetadata)
-	newOslogin, _, _ := getOSLoginEnabled(newMetadata)
+	oldOslogin, _, _, _ := getOSLoginEnabled(oldMetadata)
+	newOslogin, _, _, _ := getOSLoginEnabled(newMetadata)
 	if oldOslogin && !newOslogin {
 		return true, nil
 	}
@@ -106,7 +106,7 @@ func (a *accountsMgr) Timeout(ctx context.Context) (bool, error) {
 
 func (a *accountsMgr) Disabled(ctx context.Context) (bool, error) {
 	config := cfg.Get()
-	oslogin, _, _ := getOSLoginEnabled(newMetadata)
+	oslogin, _, _, _ := getOSLoginEnabled(newMetadata)
 	return false || runtime.GOOS == "windows" || oslogin || !config.Daemons.AccountsDaemon, nil
 }
 
@@ -344,12 +344,12 @@ func createUserGroupCmd(cmd, user, group string) (string, []string) {
 // createGoogleUser creates a Google managed user account if needed and adds it
 // to the configured groups.
 func createGoogleUser(ctx context.Context, config *cfg.Sections, user string) error {
-	var uid string
+	var uid, gid string
 	if config.Accounts.ReuseHomedir {
-		uid = getUID(fmt.Sprintf("/home/%s", user))
+		uid, gid = getUIDAndGID(fmt.Sprintf("/home/%s", user))
 	}
 
-	if err := createUser(ctx, user, uid); err != nil {
+	if err := createUser(ctx, user, uid, gid); err != nil {
 		return err
 	}
 	groups := config.Accounts.Groups

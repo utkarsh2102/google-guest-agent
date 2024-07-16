@@ -231,11 +231,17 @@ func (a *addressMgr) applyWSFCFilter(config *cfg.Sections) {
 }
 
 func (a *addressMgr) Diff(ctx context.Context) (bool, error) {
+	// Return true if this is the first call (when the first mds descriptor is available).
+	if oldMetadata == nil {
+		return true, nil
+	}
+
 	config := cfg.Get()
 	wsfcAddresses := a.parseWSFCAddresses(config)
 	wsfcEnable := a.parseWSFCEnable(config)
 
 	diff := !reflect.DeepEqual(newMetadata.Instance.NetworkInterfaces, oldMetadata.Instance.NetworkInterfaces) ||
+		!reflect.DeepEqual(newMetadata.Instance.VlanNetworkInterfaces, oldMetadata.Instance.VlanNetworkInterfaces) ||
 		wsfcEnable != oldWSFCEnable || wsfcAddresses != oldWSFCAddresses
 
 	oldWSFCAddresses = wsfcAddresses
@@ -274,10 +280,13 @@ func (a *addressMgr) Set(ctx context.Context) error {
 		a.applyWSFCFilter(config)
 	}
 
-	// Setup network interfaces.
-	err := network.SetupInterfaces(ctx, config, newMetadata.Instance.NetworkInterfaces)
-	if err != nil {
-		return fmt.Errorf("failed to setup network interfaces: %v", err)
+	// Guest Agent does not manage interfaces on Windows.
+	if runtime.GOOS != "windows" {
+		// Setup network interfaces.
+		err := network.SetupInterfaces(ctx, config, newMetadata)
+		if err != nil {
+			return fmt.Errorf("failed to setup network interfaces: %v", err)
+		}
 	}
 
 	if !config.NetworkInterfaces.IPForwarding {
