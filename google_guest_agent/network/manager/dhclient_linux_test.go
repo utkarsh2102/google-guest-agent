@@ -95,7 +95,7 @@ func (d dhclientMockPs) Find(exematch string) ([]ps.Process, error) {
 				Exe: "/random/path",
 				CommandLine: []string{
 					"dhclient",
-					d.ipVersions[i].dhclientArg,
+					d.ipVersions[i].Flag,
 					d.ifaces[i],
 				},
 			})
@@ -497,7 +497,7 @@ func TestDhclientProcessExists(t *testing.T) {
 				}
 				return
 			}
-			if err == nil && test.expectErr {
+			if test.expectErr {
 				t.Fatalf("no error returned when error expected")
 			}
 

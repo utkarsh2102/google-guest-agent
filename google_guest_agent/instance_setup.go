@@ -29,6 +29,7 @@ import (
 	"github.com/GoogleCloudPlatform/guest-agent/google_guest_agent/cfg"
 	"github.com/GoogleCloudPlatform/guest-agent/google_guest_agent/run"
 	"github.com/GoogleCloudPlatform/guest-agent/google_guest_agent/scheduler"
+	"github.com/GoogleCloudPlatform/guest-agent/retry"
 	"github.com/GoogleCloudPlatform/guest-logging-go/logger"
 	"github.com/go-ini/ini"
 )
@@ -36,13 +37,15 @@ import (
 func getDefaultAdapter(fes []ipForwardEntry) (*ipForwardEntry, error) {
 	// Choose the first adapter index that has the default route setup.
 	// This is equivalent to how route.exe works when interface is not provided.
+	defaultRoute := net.ParseIP("0.0.0.0")
 	sort.Slice(fes, func(i, j int) bool { return fes[i].ipForwardIfIndex < fes[j].ipForwardIfIndex })
 	for _, fe := range fes {
-		if fe.ipForwardDest.Equal(net.ParseIP("0.0.0.0")) {
+		if fe.ipForwardDest.Equal(defaultRoute) {
 			return &fe, nil
 		}
 	}
-	return nil, fmt.Errorf("could not find default route")
+
+	return nil, fmt.Errorf("no default route to %s found in %+v forward entries", defaultRoute.String(), fes)
 }
 
 func addMetadataRoute() error {
@@ -94,13 +97,11 @@ func agentInit(ctx context.Context) {
 	config := cfg.Get()
 
 	if runtime.GOOS == "windows" {
-		// Indefinitely retry to set up required MDS route.
-		for ; ; time.Sleep(1 * time.Second) {
-			if err := addMetadataRoute(); err != nil {
-				logger.Errorf("Could not set default route to metadata: %v", err)
-			} else {
-				break
-			}
+		// Try maximum for 1 min.
+		policy := retry.Policy{MaxAttempts: 60, BackoffFactor: 1, Jitter: time.Second}
+		err := retry.Run(ctx, policy, addMetadataRoute)
+		if err != nil {
+			panic(fmt.Sprintf("Failed to set metadata route: %+v", err))
 		}
 	} else {
 		// Linux instance setup.
@@ -159,6 +160,9 @@ func agentInit(ctx context.Context) {
 				os.Exit(1)
 			}
 		}
+
+		// Early setup the network configurations before we notify systemd we are done.
+		runManager(ctx, addressManager)
 
 		// Disable overcommit accounting; e2 instances only.
 		parts := strings.Split(newMetadata.Instance.MachineType, "/")
