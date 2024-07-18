@@ -19,7 +19,6 @@ import (
 	"encoding/json"
 	"reflect"
 	"runtime"
-	"slices"
 	"sync/atomic"
 
 	"github.com/GoogleCloudPlatform/guest-agent/google_guest_agent/cfg"
@@ -95,7 +94,7 @@ func (d *diagnosticsMgr) Set(ctx context.Context) error {
 	}
 
 	strEntry := newMetadata.Instance.Attributes.Diagnostics
-	if slices.Contains(diagnosticsEntries, strEntry) {
+	if utils.ContainsString(strEntry, diagnosticsEntries) {
 		return nil
 	}
 	diagnosticsEntries = append(diagnosticsEntries, strEntry)

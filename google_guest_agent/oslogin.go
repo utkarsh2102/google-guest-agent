@@ -20,7 +20,6 @@ import (
 	"os"
 	"os/exec"
 	"runtime"
-	"slices"
 	"strings"
 	"time"
 
@@ -38,20 +37,13 @@ var (
 	googleBlockStart = "#### Google OS Login control. Do not edit this section. ####"
 	googleBlockEnd   = "#### End Google OS Login control section. ####"
 	trustedCAWatcher events.Watcher
-
-	// deprecatedConfigDirectives contains a list of configuration directives (or lines)
-	// that we no longer support and should not be considered for updated versions of a
-	// given configuration file.
-	deprecatedConfigDirectives = map[string][]string{
-		"/etc/pam.d/su": {"account    [success=bad ignore=ignore] pam_oslogin_login.so"},
-	}
 )
 
 type osloginMgr struct{}
 
 // We also read project keys first, letting instance-level keys take
 // precedence.
-func getOSLoginEnabled(md *metadata.Descriptor) (bool, bool, bool, bool) {
+func getOSLoginEnabled(md *metadata.Descriptor) (bool, bool, bool) {
 	var enable bool
 	if md.Project.Attributes.EnableOSLogin != nil {
 		enable = *md.Project.Attributes.EnableOSLogin
@@ -73,14 +65,7 @@ func getOSLoginEnabled(md *metadata.Descriptor) (bool, bool, bool, bool) {
 	if md.Instance.Attributes.SecurityKey != nil {
 		skey = *md.Instance.Attributes.SecurityKey
 	}
-	var reqCerts bool
-	if md.Project.Attributes.RequireCerts != nil {
-		reqCerts = *md.Project.Attributes.RequireCerts
-	}
-	if md.Instance.Attributes.RequireCerts != nil {
-		reqCerts = *md.Instance.Attributes.RequireCerts
-	}
-	return enable, twofactor, skey, reqCerts
+	return enable, twofactor, skey
 }
 
 func enableDisableOSLoginCertAuth(ctx context.Context) error {
@@ -90,7 +75,7 @@ func enableDisableOSLoginCertAuth(ctx context.Context) error {
 	}
 
 	eventManager := events.Get()
-	osLoginEnabled, _, _, _ := getOSLoginEnabled(newMetadata)
+	osLoginEnabled, _, _ := getOSLoginEnabled(newMetadata)
 	if osLoginEnabled {
 		if trustedCAWatcher == nil {
 			trustedCAWatcher = sshtrustedca.New(sshtrustedca.DefaultPipePath)
@@ -99,20 +84,27 @@ func enableDisableOSLoginCertAuth(ctx context.Context) error {
 			}
 			sshca.Init()
 		}
+	} else {
+		if trustedCAWatcher != nil {
+			if err := eventManager.RemoveWatcher(ctx, trustedCAWatcher); err != nil {
+				return err
+			}
+			sshca.Close()
+			trustedCAWatcher = nil
+		}
 	}
 
 	return nil
 }
 
 func (o *osloginMgr) Diff(ctx context.Context) (bool, error) {
-	oldEnable, oldTwoFactor, oldSkey, oldReqCerts := getOSLoginEnabled(oldMetadata)
-	enable, twofactor, skey, reqCerts := getOSLoginEnabled(newMetadata)
+	oldEnable, oldTwoFactor, oldSkey := getOSLoginEnabled(oldMetadata)
+	enable, twofactor, skey := getOSLoginEnabled(newMetadata)
 	return oldMetadata.Project.ProjectID == "" ||
 		// True on first run or if any value has changed.
 		(oldTwoFactor != twofactor) ||
 		(oldEnable != enable) ||
-		(oldSkey != skey) ||
-		(oldReqCerts != reqCerts), nil
+		(oldSkey != skey), nil
 }
 
 func (o *osloginMgr) Timeout(ctx context.Context) (bool, error) {
@@ -126,10 +118,8 @@ func (o *osloginMgr) Disabled(ctx context.Context) (bool, error) {
 func (o *osloginMgr) Set(ctx context.Context) error {
 	// We need to know if it was previously enabled for the clearing of
 	// metadata-based SSH keys.
-	oldEnable, _, _, _ := getOSLoginEnabled(oldMetadata)
-	enable, twofactor, skey, reqCerts := getOSLoginEnabled(newMetadata)
-
-	cleanupDeprecatedDirectives()
+	oldEnable, _, _ := getOSLoginEnabled(oldMetadata)
+	enable, twofactor, skey := getOSLoginEnabled(newMetadata)
 
 	if enable && !oldEnable {
 		logger.Infof("Enabling OS Login")
@@ -142,7 +132,7 @@ func (o *osloginMgr) Set(ctx context.Context) error {
 		logger.Infof("Disabling OS Login")
 	}
 
-	if err := writeSSHConfig(enable, twofactor, skey, reqCerts); err != nil {
+	if err := writeSSHConfig(enable, twofactor, skey); err != nil {
 		logger.Errorf("Error updating SSH config: %v.", err)
 	}
 
@@ -198,55 +188,6 @@ func (o *osloginMgr) Set(ctx context.Context) error {
 	return nil
 }
 
-func cleanupDeprecatedLines(fpath string, directives []string) error {
-	// If the file doesn't exist don't even try updating it.
-	stat, err := os.Stat(fpath)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil
-		}
-		return fmt.Errorf("failed to stat config file: %+v", err)
-	}
-
-	data, err := os.ReadFile(fpath)
-	if err != nil {
-		return fmt.Errorf("failed to read file: %+v", err)
-	}
-
-	var updatedLines []string
-	var totalLines int
-
-	for _, line := range strings.Split(string(data), "\n") {
-		if !slices.Contains(directives, line) {
-			updatedLines = append(updatedLines, line)
-		}
-		totalLines++
-	}
-
-	// Don't attempt to update the config file if no lines werer removed/avoided.
-	if totalLines == len(updatedLines) {
-		return nil
-	}
-
-	err = os.WriteFile(fpath, []byte(strings.Join(updatedLines, "\n")), stat.Mode())
-	if err != nil {
-		return fmt.Errorf("failed to update deprecated configuration directives: %+v", err)
-	}
-
-	return nil
-}
-
-// cleanupDeprecatedDirectives checks if a given configuration line is an old
-// configuration that was deprecated and we should not consider it for the updated
-// version.
-func cleanupDeprecatedDirectives() {
-	for k, v := range deprecatedConfigDirectives {
-		if err := cleanupDeprecatedLines(k, v); err != nil {
-			logger.Errorf("failed to clean up deprecated directives: %+v", err)
-		}
-	}
-}
-
 func filterGoogleLines(contents string) []string {
 	var isgoogle, isgoogleblock bool
 	var filtered []string
@@ -279,7 +220,7 @@ func writeConfigFile(path, contents string) error {
 	return nil
 }
 
-func updateSSHConfig(sshConfig string, enable, twofactor, skey, reqCerts bool) string {
+func updateSSHConfig(sshConfig string, enable, twofactor, skey bool) string {
 	// TODO: this feels like a case for a text/template
 	challengeResponseEnable := "ChallengeResponseAuthentication yes"
 	authorizedKeysCommand := "AuthorizedKeysCommand /usr/bin/google_authorized_keys"
@@ -312,15 +253,12 @@ func updateSSHConfig(sshConfig string, enable, twofactor, skey, reqCerts bool) s
 	if enable {
 		osLoginBlock := []string{googleBlockStart}
 
-		// Metadata overrides the config file.
-		if reqCerts {
+		if cfg.Get().OSLogin.CertAuthentication {
 			osLoginBlock = append(osLoginBlock, trustedUserCAKeys, authorizedPrincipalsCommand, authorizedPrincipalsUser)
-		} else {
-			if cfg.Get().OSLogin.CertAuthentication {
-				osLoginBlock = append(osLoginBlock, trustedUserCAKeys, authorizedPrincipalsCommand, authorizedPrincipalsUser)
-			}
-			osLoginBlock = append(osLoginBlock, authorizedKeysCommand, authorizedKeysUser)
 		}
+
+		osLoginBlock = append(osLoginBlock, authorizedKeysCommand, authorizedKeysUser)
+
 		if twofactor {
 			osLoginBlock = append(osLoginBlock, twoFactorAuthMethods, challengeResponseEnable)
 		}
@@ -334,12 +272,12 @@ func updateSSHConfig(sshConfig string, enable, twofactor, skey, reqCerts bool) s
 	return strings.Join(filtered, "\n")
 }
 
-func writeSSHConfig(enable, twofactor, skey, reqCerts bool) error {
+func writeSSHConfig(enable, twofactor, skey bool) error {
 	sshConfig, err := os.ReadFile("/etc/ssh/sshd_config")
 	if err != nil {
 		return err
 	}
-	proposed := updateSSHConfig(string(sshConfig), enable, twofactor, skey, reqCerts)
+	proposed := updateSSHConfig(string(sshConfig), enable, twofactor, skey)
 	if proposed == string(sshConfig) {
 		return nil
 	}
@@ -422,7 +360,7 @@ func writePAMConfig(enable, twofactor bool) error {
 }
 
 func updateGroupConf(groupconf string, enable bool) string {
-	config := "sshd;*;*;Al0000-2400;video"
+	config := "sshd;*;*;Al0000-2400;video\n"
 
 	filtered := filterGoogleLines(groupconf)
 	if enable {

@@ -57,7 +57,7 @@ func mkdirpWithPerms(dir string, p os.FileMode, uid, gid int) error {
 			}
 		}
 	} else {
-		parent := path.Dir(dir)
+		parent, _ := path.Split(dir)
 		if parent != "/" && parent != "" {
 			if err := mkdirpWithPerms(parent, p, uid, gid); err != nil {
 				return err
