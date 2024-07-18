@@ -197,8 +197,8 @@ func TestUpdateSSHConfig(t *testing.T) {
 	matchblock2 := `       AuthenticationMethods publickey`
 
 	var tests = []struct {
-		contents, want                             []string
-		enable, twofactor, skey, reqCerts, cfgCert bool
+		contents, want                []string
+		enable, twofactor, skey, cert bool
 	}{
 		{
 			// Full block is created, any others removed.
@@ -227,8 +227,7 @@ func TestUpdateSSHConfig(t *testing.T) {
 			enable:    true,
 			twofactor: true,
 			skey:      false,
-			reqCerts:  false,
-			cfgCert:   true,
+			cert:      true,
 		},
 		{
 			// Full block is created, any others removed.
@@ -254,8 +253,7 @@ func TestUpdateSSHConfig(t *testing.T) {
 			enable:    true,
 			twofactor: true,
 			skey:      false,
-			reqCerts:  false,
-			cfgCert:   false,
+			cert:      false,
 		},
 		{
 			// Full block is created, google comments removed.
@@ -285,8 +283,7 @@ func TestUpdateSSHConfig(t *testing.T) {
 			enable:    true,
 			twofactor: true,
 			skey:      false,
-			reqCerts:  false,
-			cfgCert:   true,
+			cert:      true,
 		},
 		{
 			// Full block is created, google comments removed.
@@ -313,8 +310,7 @@ func TestUpdateSSHConfig(t *testing.T) {
 			enable:    true,
 			twofactor: true,
 			skey:      false,
-			reqCerts:  false,
-			cfgCert:   false,
+			cert:      false,
 		},
 		{
 			// Block is created without two-factor options.
@@ -336,8 +332,7 @@ func TestUpdateSSHConfig(t *testing.T) {
 			enable:    true,
 			twofactor: false,
 			skey:      false,
-			reqCerts:  false,
-			cfgCert:   true,
+			cert:      true,
 		},
 		{
 			// Block is created without two-factor options.
@@ -356,8 +351,7 @@ func TestUpdateSSHConfig(t *testing.T) {
 			enable:    true,
 			twofactor: false,
 			skey:      false,
-			reqCerts:  false,
-			cfgCert:   false,
+			cert:      false,
 		},
 		{
 			// Existing block is removed.
@@ -375,8 +369,7 @@ func TestUpdateSSHConfig(t *testing.T) {
 			enable:    false,
 			twofactor: true,
 			skey:      false,
-			reqCerts:  true,
-			cfgCert:   true,
+			cert:      true,
 		},
 		{
 			// Existing block is removed.
@@ -394,8 +387,7 @@ func TestUpdateSSHConfig(t *testing.T) {
 			enable:    false,
 			twofactor: true,
 			skey:      false,
-			reqCerts:  false,
-			cfgCert:   false,
+			cert:      false,
 		},
 		{
 			// Skey binary is chosen instead.
@@ -420,8 +412,7 @@ func TestUpdateSSHConfig(t *testing.T) {
 			enable:    true,
 			twofactor: false,
 			skey:      true,
-			reqCerts:  false,
-			cfgCert:   true,
+			cert:      true,
 		},
 		{
 			// Skey binary is chosen instead.
@@ -443,56 +434,7 @@ func TestUpdateSSHConfig(t *testing.T) {
 			enable:    true,
 			twofactor: false,
 			skey:      true,
-			reqCerts:  false,
-			cfgCert:   false,
-		},
-		{
-			// Keys are disabled by metadata.
-			contents: []string{
-				"line1",
-				"line2",
-				googleBlockStart,
-				"line3",
-				googleBlockEnd,
-			},
-			want: []string{
-				googleBlockStart,
-				trustedUserCAKeys,
-				authorizedPrincipalsCommand,
-				authorizedPrincipalsUser,
-				googleBlockEnd,
-				"line1",
-				"line2",
-			},
-			enable:    true,
-			twofactor: false,
-			skey:      false,
-			reqCerts:  true,
-			cfgCert:   true,
-		},
-		{
-			// Metadata overrides config.
-			contents: []string{
-				"line1",
-				"line2",
-				googleBlockStart,
-				"line3",
-				googleBlockEnd,
-			},
-			want: []string{
-				googleBlockStart,
-				trustedUserCAKeys,
-				authorizedPrincipalsCommand,
-				authorizedPrincipalsUser,
-				googleBlockEnd,
-				"line1",
-				"line2",
-			},
-			enable:    true,
-			twofactor: false,
-			skey:      false,
-			reqCerts:  true,
-			cfgCert:   false,
+			cert:      false,
 		},
 	}
 
@@ -506,9 +448,9 @@ func TestUpdateSSHConfig(t *testing.T) {
 	for idx, tt := range tests {
 		contents := strings.Join(tt.contents, "\n")
 		want := strings.Join(tt.want, "\n")
-		config.OSLogin.CertAuthentication = tt.cfgCert
+		config.OSLogin.CertAuthentication = tt.cert
 
-		if res := updateSSHConfig(contents, tt.enable, tt.twofactor, tt.skey, tt.reqCerts); res != want {
+		if res := updateSSHConfig(contents, tt.enable, tt.twofactor, tt.skey); res != want {
 			t.Errorf("test %v\nwant:\n%v\ngot:\n%v\n", idx, want, res)
 		}
 	}
@@ -609,6 +551,7 @@ func TestUpdateGroupConf(t *testing.T) {
 				"line2",
 				googleComment,
 				config,
+				"",
 			},
 			enable: true,
 		},
@@ -635,6 +578,7 @@ func TestUpdateGroupConf(t *testing.T) {
 				"line2",
 				googleComment,
 				config,
+				"",
 			},
 			enable: true,
 		},
@@ -665,22 +609,20 @@ func TestUpdateGroupConf(t *testing.T) {
 
 func TestGetOSLoginEnabled(t *testing.T) {
 	var tests = []struct {
-		md                                string
-		enable, twofactor, skey, reqCerts bool
+		md                      string
+		enable, twofactor, skey bool
 	}{
 		{
 			md:        `{"instance": {"attributes": {"enable-oslogin": "true", "enable-oslogin-2fa": "true"}}}`,
 			enable:    true,
 			twofactor: true,
 			skey:      false,
-			reqCerts:  false,
 		},
 		{
-			md:        `{"project": {"attributes": {"enable-oslogin": "true", "enable-oslogin-2fa": "true", "enable-oslogin-certificates": "true"}}}`,
+			md:        `{"project": {"attributes": {"enable-oslogin": "true", "enable-oslogin-2fa": "true"}}}`,
 			enable:    true,
 			twofactor: true,
 			skey:      false,
-			reqCerts:  true,
 		},
 		{
 			// Instance keys take precedence
@@ -688,7 +630,6 @@ func TestGetOSLoginEnabled(t *testing.T) {
 			enable:    true,
 			twofactor: true,
 			skey:      false,
-			reqCerts:  false,
 		},
 		{
 			// Instance keys take precedence
@@ -696,7 +637,6 @@ func TestGetOSLoginEnabled(t *testing.T) {
 			enable:    false,
 			twofactor: false,
 			skey:      false,
-			reqCerts:  false,
 		},
 		{
 			// Handle weird values
@@ -704,7 +644,6 @@ func TestGetOSLoginEnabled(t *testing.T) {
 			enable:    true,
 			twofactor: false,
 			skey:      false,
-			reqCerts:  false,
 		},
 		{
 			// Mixed test
@@ -712,7 +651,6 @@ func TestGetOSLoginEnabled(t *testing.T) {
 			enable:    true,
 			twofactor: false,
 			skey:      false,
-			reqCerts:  false,
 		},
 		{
 			// Skey test
@@ -720,15 +658,6 @@ func TestGetOSLoginEnabled(t *testing.T) {
 			enable:    true,
 			twofactor: true,
 			skey:      true,
-			reqCerts:  false,
-		},
-		{
-			// ReqCerts test
-			md:        `{"instance": {"attributes": {"enable-oslogin": "true", "enable-oslogin-2fa": "true", "enable-oslogin-certificates": "true"}}}`,
-			enable:    true,
-			twofactor: true,
-			skey:      false,
-			reqCerts:  true,
 		},
 	}
 
@@ -737,9 +666,9 @@ func TestGetOSLoginEnabled(t *testing.T) {
 		if err := json.Unmarshal([]byte(tt.md), &md); err != nil {
 			t.Errorf("Failed to unmarshal metadata JSON for test %v: %v", idx, err)
 		}
-		enable, twofactor, skey, reqCerts := getOSLoginEnabled(&md)
-		if enable != tt.enable || twofactor != tt.twofactor || skey != tt.skey || reqCerts != tt.reqCerts {
-			t.Errorf("Test %v failed. Expected: %v/%v/%v/%v Got: %v/%v/%v/%v", idx, tt.enable, tt.twofactor, tt.skey, tt.reqCerts, enable, twofactor, skey, reqCerts)
+		enable, twofactor, skey := getOSLoginEnabled(&md)
+		if enable != tt.enable || twofactor != tt.twofactor || skey != tt.skey {
+			t.Errorf("Test %v failed. Expected: %v/%v/%v Got: %v/%v/%v", idx, tt.enable, tt.twofactor, tt.skey, enable, twofactor, skey)
 		}
 	}
 }

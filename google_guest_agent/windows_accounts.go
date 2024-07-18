@@ -29,7 +29,6 @@ import (
 	"math/big"
 	"reflect"
 	"runtime"
-	"slices"
 	"strconv"
 	"strings"
 
@@ -134,7 +133,7 @@ func createOrResetPwd(ctx context.Context, k metadata.WindowsKey) (*credsJSON, e
 		}
 	} else {
 		logger.Infof("Creating user %s", k.UserName)
-		if err := createUser(ctx, k.UserName, pwd, ""); err != nil {
+		if err := createUser(ctx, k.UserName, pwd); err != nil {
 			return nil, fmt.Errorf("error running createUser: %v", err)
 		}
 		if k.AddToAdministrators == nil || *k.AddToAdministrators {
@@ -156,7 +155,7 @@ func createSSHUser(ctx context.Context, user string) error {
 		return nil
 	}
 	logger.Infof("Creating user %s", user)
-	if err := createUser(ctx, user, pwd, ""); err != nil {
+	if err := createUser(ctx, user, pwd); err != nil {
 		return fmt.Errorf("error running createUser: %v", err)
 	}
 
@@ -423,7 +422,7 @@ func compareAccounts(newKeys metadata.WindowsKeys, oldStrKeys []string) metadata
 	for _, s := range oldStrKeys {
 		var key metadata.WindowsKey
 		if err := json.Unmarshal([]byte(s), &key); err != nil {
-			if !slices.Contains(badReg, s) {
+			if !utils.ContainsString(s, badReg) {
 				logger.Errorf("Bad windows key from registry: %s", err)
 				badReg = append(badReg, s)
 			}

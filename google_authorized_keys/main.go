@@ -154,14 +154,7 @@ func main() {
 	} else {
 		opts.Writers = []io.Writer{os.Stderr}
 	}
-
-	if err := logger.Init(ctx, opts); err != nil {
-		fmt.Printf("Error initializing logger: %+v", err)
-		os.Exit(1)
-	}
-
-	// Try flushing logs before exiting, if not flushed logs could go missing.
-	defer logger.Close()
+	logger.Init(ctx, opts)
 
 	instanceAttributes, err := getMetadataAttributes(ctx, "instance/attributes/")
 	if err != nil {

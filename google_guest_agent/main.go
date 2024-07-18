@@ -53,7 +53,6 @@ var (
 	oldMetadata, newMetadata *metadata.Descriptor
 	osInfo                   osinfo.OSInfo
 	mdsClient                *metadata.Client
-	addressManager           = &addressMgr{}
 )
 
 const (
@@ -87,7 +86,7 @@ func closeFile(c io.Closer) {
 
 func availableManagers() []manager {
 	managers := []manager{
-		addressManager,
+		&addressMgr{},
 	}
 
 	if runtime.GOOS == "windows" {
@@ -105,48 +104,45 @@ func availableManagers() []manager {
 	)
 }
 
-func runManager(ctx context.Context, mgr manager) {
-	disabled, err := mgr.Disabled(ctx)
-	if err != nil {
-		logger.Errorf("Failed to run manager's Disabled() call: %+v", err)
-		return
-	}
-
-	if disabled {
-		logger.Debugf("manager %#v disabled, skipping", mgr)
-		return
-	}
-
-	timeout, err := mgr.Timeout(ctx)
-	if err != nil {
-		logger.Errorf("[%#v] Failed to run manager Timeout() call: %+v", mgr, err)
-		return
-	}
-
-	diff, err := mgr.Diff(ctx)
-	if err != nil {
-		logger.Errorf("[%#v] Failed to run manager Diff() call: %+v", mgr, err)
-		return
-	}
-
-	if !timeout && !diff {
-		logger.Debugf("[%#v] Manager reports no diff", mgr)
-		return
-	}
-
-	logger.Debugf("running %#v manager", mgr)
-	if err := mgr.Set(ctx); err != nil {
-		logger.Errorf("[%#v] Failed to run manager Set() call: %s", mgr, err)
-	}
-}
-
 func runUpdate(ctx context.Context) {
 	var wg sync.WaitGroup
 	for _, mgr := range availableManagers() {
 		wg.Add(1)
 		go func(mgr manager) {
 			defer wg.Done()
-			runManager(ctx, mgr)
+
+			disabled, err := mgr.Disabled(ctx)
+			if err != nil {
+				logger.Errorf("Failed to run manager's Disabled() call: %+v", err)
+				return
+			}
+
+			if disabled {
+				logger.Debugf("manager %#v disabled, skipping", mgr)
+				return
+			}
+
+			timeout, err := mgr.Timeout(ctx)
+			if err != nil {
+				logger.Errorf("[%#v] Failed to run manager Timeout() call: %+v", mgr, err)
+				return
+			}
+
+			diff, err := mgr.Diff(ctx)
+			if err != nil {
+				logger.Errorf("[%#v] Failed to run manager Diff() call: %+v", mgr, err)
+				return
+			}
+
+			if !timeout && !diff {
+				logger.Debugf("[%#v] Manager reports no diff", mgr)
+				return
+			}
+
+			logger.Debugf("running %#v manager", mgr)
+			if err := mgr.Set(ctx); err != nil {
+				logger.Errorf("[%#v] Failed to run manager Set() call: %s", mgr, err)
+			}
 		}(mgr)
 	}
 	wg.Wait()
@@ -172,9 +168,6 @@ func runAgent(ctx context.Context) {
 		fmt.Printf("Error initializing logger: %v", err)
 		os.Exit(1)
 	}
-
-	// Try flushing logs before exiting, if not flushed logs could go missing.
-	defer logger.Close()
 
 	logger.Infof("GCE Agent Started (version %s)", version)
 
@@ -227,7 +220,7 @@ func runAgent(ctx context.Context) {
 		logger.Debugf("Handling metadata %q event.", evType)
 
 		// If metadata watcher failed there isn't much we can do, just ignore the event and
-		// allow the watcher to get it corrected.
+		// allow the water to get it corrected.
 		if evData.Error != nil {
 			logger.Infof("Metadata event watcher failed, ignoring: %+v", evData.Error)
 			return true
