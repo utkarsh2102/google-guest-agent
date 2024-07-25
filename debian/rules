@@ -4,6 +4,7 @@
 export PATH := /usr/lib/go-1.21/bin:$(PATH)
 
 export DH_GOLANG_BUILDPKG := github.com/GoogleCloudPlatform/guest-agent/google_guest_agent github.com/GoogleCloudPlatform/guest-agent/google_metadata_script_runner github.com/GoogleCloudPlatform/guest-agent/gce_workload_cert_refresh
+export DH_GOLANG_INSTALL_EXTRA := vendor/google.golang.org/protobuf/internal/editiondefaults/editions_defaults.binpb
 
 # use Go 1.18 as golang-any defaults to Go 1.13, which
 # doesn't have new features needed by this package.
