@@ -15,14 +15,15 @@
 package main
 
 import (
+	"context"
 	"fmt"
-	"net/http"
-	"net/http/httptest"
 	"reflect"
 	"strconv"
 	"strings"
 	"testing"
-	"time"
+
+	"github.com/GoogleCloudPlatform/guest-agent/metadata"
+	"github.com/GoogleCloudPlatform/guest-agent/utils"
 )
 
 func stringSliceEqual(a, b []string) bool {
@@ -50,16 +51,20 @@ var truebool *bool = &t
 var falsebool *bool = &f
 
 func TestParseSSHKeys(t *testing.T) {
+	pubKeyA := utils.MakeRandRSAPubKey(t)
+	pubKeyB := utils.MakeRandRSAPubKey(t)
+	pubKey := utils.MakeRandRSAPubKey(t)
+
 	keys := []string{
 		"# Here is some random data in the file.",
-		"usera:ssh-rsa AAAA1234USERA",
-		"userb:ssh-rsa AAAA1234USERB",
-		`usera:ssh-rsa AAAA1234 google-ssh {"userName":"usera@example.com","expireOn":"2095-04-23T12:34:56+0000"}`,
-		`usera:ssh-rsa AAAA1234 google-ssh {"userName":"usera@example.com","expireOn":"2020-04-23T12:34:56+0000"}`,
+		fmt.Sprintf("usera:ssh-rsa %s", pubKeyA),
+		fmt.Sprintf("userb:ssh-rsa %s", pubKeyB),
+		fmt.Sprintf(`usera:ssh-rsa %s google-ssh {"userName":"usera@example.com","expireOn":"2095-04-23T12:34:56+0000"}`, pubKey),
+		fmt.Sprintf(`usera:ssh-rsa %s google-ssh {"userName":"usera@example.com","expireOn":"2020-04-23T12:34:56+0000"}`, pubKey),
 	}
 	expected := []string{
-		"ssh-rsa AAAA1234USERA",
-		`ssh-rsa AAAA1234 google-ssh {"userName":"usera@example.com","expireOn":"2095-04-23T12:34:56+0000"}`,
+		fmt.Sprintf("ssh-rsa %s", pubKeyA),
+		fmt.Sprintf(`ssh-rsa %s google-ssh {"userName":"usera@example.com","expireOn":"2095-04-23T12:34:56+0000"}`, pubKey),
 	}
 
 	user := "usera"
@@ -117,6 +122,8 @@ func TestCheckWinSSHEnabled(t *testing.T) {
 }
 
 func TestGetUserKeysNew(t *testing.T) {
+	pubKey := utils.MakeRandRSAPubKey(t)
+
 	tests := []struct {
 		userName         string
 		instanceMetadata attributes
@@ -125,102 +132,114 @@ func TestGetUserKeysNew(t *testing.T) {
 	}{
 		{
 			userName: "name",
-			instanceMetadata: attributes{BlockProjectSSHKeys: false,
-				SSHKeys: []string{"name:ssh-rsa [KEY] instance1", "othername:ssh-rsa [KEY] instance2"},
+			instanceMetadata: attributes{
+				BlockProjectSSHKeys: false,
+				SSHKeys: []string{
+					fmt.Sprintf("name:ssh-rsa %s instance1", pubKey),
+					fmt.Sprintf("othername:ssh-rsa %s instance2", pubKey),
+				},
 			},
 			projectMetadata: attributes{
-				SSHKeys: []string{"name:ssh-rsa [KEY] project1", "othername:ssh-rsa [KEY] project2"},
+				SSHKeys: []string{
+					fmt.Sprintf("name:ssh-rsa %s project1", pubKey),
+					fmt.Sprintf("othername:ssh-rsa %s project2", pubKey),
+				},
 			},
-			expectedKeys: []string{"ssh-rsa [KEY] instance1", "ssh-rsa [KEY] project1"},
+			expectedKeys: []string{
+				fmt.Sprintf("ssh-rsa %s instance1", pubKey),
+				fmt.Sprintf("ssh-rsa %s project1", pubKey),
+			},
 		},
 		{
 			userName: "name",
-			instanceMetadata: attributes{BlockProjectSSHKeys: true,
-				SSHKeys: []string{"name:ssh-rsa [KEY] instance1", "othername:ssh-rsa [KEY] instance2"},
+			instanceMetadata: attributes{
+				BlockProjectSSHKeys: true,
+				SSHKeys: []string{
+					fmt.Sprintf("name:ssh-rsa %s instance1", pubKey),
+					fmt.Sprintf("othername:ssh-rsa %s instance2", pubKey),
+				},
 			},
 			projectMetadata: attributes{
-				SSHKeys: []string{"name:ssh-rsa [KEY] project1", "othername:ssh-rsa [KEY] project2"},
+				SSHKeys: []string{
+					fmt.Sprintf("name:ssh-rsa %s project1", pubKey),
+					fmt.Sprintf("othername:ssh-rsa %s project2", pubKey),
+				},
 			},
-			expectedKeys: []string{"ssh-rsa [KEY] instance1"},
+			expectedKeys: []string{fmt.Sprintf("ssh-rsa %s instance1", pubKey)},
 		},
 		{
 			userName: "name",
-			instanceMetadata: attributes{BlockProjectSSHKeys: false,
-				SSHKeys: []string{"name:ssh-rsa [KEY] instance1", "othername:ssh-rsa [KEY] instance2"},
+			instanceMetadata: attributes{
+				BlockProjectSSHKeys: false,
+				SSHKeys: []string{
+					fmt.Sprintf("name:ssh-rsa %s instance1", pubKey),
+					fmt.Sprintf("othername:ssh-rsa %s instance2", pubKey),
+				},
 			},
 			projectMetadata: attributes{
 				SSHKeys: nil,
 			},
-			expectedKeys: []string{"ssh-rsa [KEY] instance1"},
+			expectedKeys: []string{fmt.Sprintf("ssh-rsa %s instance1", pubKey)},
 		},
 		{
 			userName: "name",
-			instanceMetadata: attributes{BlockProjectSSHKeys: false,
-				SSHKeys: nil,
+			instanceMetadata: attributes{
+				BlockProjectSSHKeys: false,
+				SSHKeys:             nil,
 			},
 			projectMetadata: attributes{
-				SSHKeys: []string{"name:ssh-rsa [KEY] project1", "othername:ssh-rsa [KEY] project2"},
+				SSHKeys: []string{
+					fmt.Sprintf("name:ssh-rsa %s project1", pubKey),
+					fmt.Sprintf("othername:ssh-rsa %s project2", pubKey),
+				},
 			},
-			expectedKeys: []string{"ssh-rsa [KEY] project1"},
+			expectedKeys: []string{fmt.Sprintf("ssh-rsa %s project1", pubKey)},
 		},
 	}
 
 	for count, tt := range tests {
-		if got, want := getUserKeys(tt.userName, &tt.instanceMetadata, &tt.projectMetadata), tt.expectedKeys; !stringSliceEqual(got, want) {
-			t.Errorf("getUserKeys[%d] incorrect return: got %v, want %v", count, got, want)
-		}
+		t.Run(fmt.Sprintf("test-%d", count), func(t *testing.T) {
+			if got, want := getUserKeys(tt.userName, &tt.instanceMetadata, &tt.projectMetadata), tt.expectedKeys; !stringSliceEqual(got, want) {
+				t.Errorf("getUserKeys[%d] incorrect return: got %v, want %v", count, got, want)
+			}
+		})
 	}
 }
 
 func TestGetMetadataAttributes(t *testing.T) {
 	tests := []struct {
-		metadata  string
 		att       *attributes
 		expectErr bool
 	}{
 		{
-			metadata:  `{"enable-windows-ssh":"true","ssh-keys":"name:ssh-rsa [KEY] instance1\nothername:ssh-rsa [KEY] instance2","block-project-ssh-keys":"false","other-metadata":"foo"}`,
 			att:       &attributes{EnableWindowsSSH: truebool, SSHKeys: []string{"name:ssh-rsa [KEY] instance1", "othername:ssh-rsa [KEY] instance2"}, BlockProjectSSHKeys: false},
 			expectErr: false,
 		},
 		{
-			metadata:  `{"enable-windows-ssh":"true","ssh-keys":"name:ssh-rsa [KEY] instance1\nothername:ssh-rsa [KEY] instance2","block-project-ssh-keys":"true","other-metadata":"foo"}`,
 			att:       &attributes{EnableWindowsSSH: truebool, SSHKeys: []string{"name:ssh-rsa [KEY] instance1", "othername:ssh-rsa [KEY] instance2"}, BlockProjectSSHKeys: true},
 			expectErr: false,
 		},
 		{
-			metadata:  `{"ssh-keys":"name:ssh-rsa [KEY] instance1\nothername:ssh-rsa [KEY] instance2","block-project-ssh-keys":"false","other-metadata":"foo"}`,
 			att:       &attributes{EnableWindowsSSH: nil, SSHKeys: []string{"name:ssh-rsa [KEY] instance1", "othername:ssh-rsa [KEY] instance2"}, BlockProjectSSHKeys: false},
 			expectErr: false,
 		},
 		{
-			metadata:  `{"enable-windows-ssh":"false","ssh-keys":"name:ssh-rsa [KEY] instance1\nothername:ssh-rsa [KEY] instance2","other-metadata":"foo"}`,
 			att:       &attributes{EnableWindowsSSH: falsebool, SSHKeys: []string{"name:ssh-rsa [KEY] instance1", "othername:ssh-rsa [KEY] instance2"}, BlockProjectSSHKeys: false},
 			expectErr: false,
 		},
 		{
-			metadata:  `BADJSON`,
 			att:       nil,
 			expectErr: true,
 		},
 	}
 
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Get test number from request path
-		tnum, _ := strconv.Atoi(strings.Split(r.URL.Path, "/")[2])
-		fmt.Fprintf(w, tests[tnum].metadata)
-	}))
-
-	defer ts.Close()
-
-	metadataURL = ts.URL
-	defaultTimeout = 1 * time.Second
+	client = &mdsClient{}
 
 	for count, tt := range tests {
 		want := tt.att
 		hasErr := false
 		reqStr := fmt.Sprintf("/attributes/%d", count)
-		got, err := getMetadataAttributes(reqStr)
+		got, err := getMetadataAttributes(context.Background(), reqStr)
 		if err != nil {
 			hasErr = true
 		}
@@ -229,4 +248,44 @@ func TestGetMetadataAttributes(t *testing.T) {
 			t.Errorf("Failed: Got: %v, Want: %v, Error: %v", got, want, err)
 		}
 	}
+}
+
+type mdsClient struct{}
+
+func (mds *mdsClient) Get(ctx context.Context) (*metadata.Descriptor, error) {
+	return nil, fmt.Errorf("Get() not yet implemented")
+}
+
+func (mds *mdsClient) GetKey(ctx context.Context, key string, headers map[string]string) (string, error) {
+	return "", fmt.Errorf("GetKey() not yet implemented")
+}
+
+func (mds *mdsClient) GetKeyRecursive(ctx context.Context, key string) (string, error) {
+	i, err := strconv.Atoi(key[strings.LastIndex(key, "/")+1:])
+	if err != nil {
+		return "", err
+	}
+
+	switch i {
+	case 0:
+		return `{"enable-windows-ssh":"true","ssh-keys":"name:ssh-rsa [KEY] instance1\nothername:ssh-rsa [KEY] instance2","block-project-ssh-keys":"false","other-metadata":"foo"}`, nil
+	case 1:
+		return `{"enable-windows-ssh":"true","ssh-keys":"name:ssh-rsa [KEY] instance1\nothername:ssh-rsa [KEY] instance2","block-project-ssh-keys":"true","other-metadata":"foo"}`, nil
+	case 2:
+		return `{"ssh-keys":"name:ssh-rsa [KEY] instance1\nothername:ssh-rsa [KEY] instance2","block-project-ssh-keys":"false","other-metadata":"foo"}`, nil
+	case 3:
+		return `{"enable-windows-ssh":"false","ssh-keys":"name:ssh-rsa [KEY] instance1\nothername:ssh-rsa [KEY] instance2","other-metadata":"foo"}`, nil
+	case 4:
+		return "BADJSON", nil
+	default:
+		return "", fmt.Errorf("unknown key %q", key)
+	}
+}
+
+func (mds *mdsClient) Watch(ctx context.Context) (*metadata.Descriptor, error) {
+	return nil, fmt.Errorf("Watch() not yet implemented")
+}
+
+func (mds *mdsClient) WriteGuestAttributes(ctx context.Context, key string, value string) error {
+	return fmt.Errorf("WriteGuestattributes() not yet implemented")
 }
