@@ -25,14 +25,12 @@ import (
 	"sync"
 	"time"
 
-	"github.com/GoogleCloudPlatform/guest-agent/google_guest_agent/agentcrypto"
 	"github.com/GoogleCloudPlatform/guest-agent/google_guest_agent/cfg"
+	"github.com/GoogleCloudPlatform/guest-agent/google_guest_agent/command"
 	"github.com/GoogleCloudPlatform/guest-agent/google_guest_agent/events"
 	mdsEvent "github.com/GoogleCloudPlatform/guest-agent/google_guest_agent/events/metadata"
-	"github.com/GoogleCloudPlatform/guest-agent/google_guest_agent/events/sshtrustedca"
 	"github.com/GoogleCloudPlatform/guest-agent/google_guest_agent/osinfo"
 	"github.com/GoogleCloudPlatform/guest-agent/google_guest_agent/scheduler"
-	"github.com/GoogleCloudPlatform/guest-agent/google_guest_agent/sshca"
 	"github.com/GoogleCloudPlatform/guest-agent/google_guest_agent/telemetry"
 	"github.com/GoogleCloudPlatform/guest-agent/metadata"
 	"github.com/GoogleCloudPlatform/guest-agent/utils"
@@ -178,10 +176,15 @@ func runAgent(ctx context.Context) {
 
 	agentInit(ctx)
 
+	if cfg.Get().Unstable.CommandMonitorEnabled {
+		command.Init(ctx)
+		defer command.Close()
+	}
+
 	// Previous request to metadata *may* not have worked becasue routes don't get added until agentInit.
 	var err error
 	if newMetadata == nil {
-		/// Error here doesn't matter, if we cant get metadata, we cant record telemetry.
+		// Error here doesn't matter, if we cant get metadata, we cant record telemetry.
 		newMetadata, err = mdsClient.Get(ctx)
 		if err != nil {
 			logger.Debugf("Error getting metdata: %v", err)
@@ -201,25 +204,16 @@ func runAgent(ctx context.Context) {
 	knownJobs := []scheduler.Job{telemetry.New(mdsClient, programName, version)}
 	scheduler.ScheduleJobs(ctx, knownJobs, false)
 
-	// Schedules jobs that need to be started before notifying systemd Agent process has started.
-	if cfg.Get().Unstable.MDSMTLS {
-		scheduler.ScheduleJobs(ctx, []scheduler.Job{agentcrypto.New()}, true)
-	}
-
-	eventsConfig := &events.Config{
-		Watchers: []string{
-			mdsEvent.WatcherID,
-			sshtrustedca.WatcherID,
-		},
-	}
-
-	eventManager, err := events.New(eventsConfig)
-	if err != nil {
+	eventManager := events.Get()
+	if err := eventManager.AddDefaultWatchers(ctx); err != nil {
 		logger.Errorf("Error initializing event manager: %v", err)
 		return
 	}
 
-	sshca.Init(eventManager)
+	if err := enableDisableOSLoginCertAuth(ctx); err != nil {
+		logger.Errorf("Failed to enable sshtrustedca watcher: %+v", err)
+		return
+	}
 
 	oldMetadata = &metadata.Descriptor{}
 	eventManager.Subscribe(mdsEvent.LongpollEvent, nil, func(ctx context.Context, evType string, data interface{}, evData *events.EventData) bool {
@@ -238,13 +232,21 @@ func runAgent(ctx context.Context) {
 		}
 
 		newMetadata = evData.Data.(*metadata.Descriptor)
+
+		if err := enableDisableOSLoginCertAuth(ctx); err != nil {
+			logger.Errorf("Failed to enable/disable sshtrustedca watcher: %+v", err)
+		}
+
 		runUpdate(ctx)
 		oldMetadata = newMetadata
 
 		return true
 	})
 
-	eventManager.Run(ctx)
+	if err := eventManager.Run(ctx); err != nil {
+		logger.Fatalf("Failed to run event manager: %+v", err)
+	}
+
 	logger.Infof("GCE Agent Stopped")
 }
 

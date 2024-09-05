@@ -15,17 +15,21 @@
 package main
 
 import (
+	"context"
 	"fmt"
-	"net/http"
-	"net/http/httptest"
 	"net/url"
 	"os"
 	"reflect"
 	"testing"
+
+	"github.com/GoogleCloudPlatform/guest-agent/google_guest_agent/cfg"
+	"github.com/GoogleCloudPlatform/guest-agent/metadata"
 )
 
 func TestMain(m *testing.M) {
-	config, _ = parseConfig("")
+	if err := cfg.Load(nil); err != nil {
+		os.Exit(1)
+	}
 	os.Exit(m.Run())
 }
 
@@ -158,17 +162,33 @@ func TestParseGCS(t *testing.T) {
 	}
 }
 
+type mdsClient struct{}
+
+func (mds *mdsClient) Get(ctx context.Context) (*metadata.Descriptor, error) {
+	return nil, fmt.Errorf("Get() not yet implemented")
+}
+
+func (mds *mdsClient) GetKey(ctx context.Context, key string, headers map[string]string) (string, error) {
+	return "", fmt.Errorf("GetKey() not yet implemented")
+}
+
+func (mds *mdsClient) GetKeyRecursive(ctx context.Context, key string) (string, error) {
+	return `{"key1":"value1","key2":"value2"}`, nil
+}
+
+func (mds *mdsClient) Watch(ctx context.Context) (*metadata.Descriptor, error) {
+	return nil, fmt.Errorf("Watch() not yet implemented")
+}
+
+func (mds *mdsClient) WriteGuestAttributes(ctx context.Context, key string, value string) error {
+	return fmt.Errorf("WriteGuestattributes() not yet implemented")
+}
+
 func TestGetMetadata(t *testing.T) {
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		fmt.Fprintln(w, `{"key1":"value1","key2":"value2"}`)
-	}))
-	defer ts.Close()
-
-	metadataURL = ts.URL
-	metadataHang = ""
-
+	ctx := context.Background()
+	client = &mdsClient{}
 	want := map[string]string{"key1": "value1", "key2": "value2"}
-	got, err := getMetadataAttributes("")
+	got, err := getMetadataAttributes(ctx, "")
 	if err != nil {
 		t.Fatalf("error running getMetadataAttributes: %v", err)
 	}
@@ -228,5 +248,52 @@ func TestNormalizeFilePathForWindows(t *testing.T) {
 			t.Errorf("Return didn't match expected output for inputs:\n fileName: %s, metadataKey: %s, gcsScriptUrl: %s\n Expected: %s\n Got: %s",
 				tmpFilePath, tc.metadataKey, tc.gcsScriptURLPath, tc.want, got)
 		}
+	}
+}
+
+func TestGetWantedKeysError(t *testing.T) {
+	// Reset original value.
+	defer cfg.Load(nil)
+
+	tests := []struct {
+		cfg string
+		arg string
+		os  string
+	}{
+		{
+			cfg: `[MetadataScripts]
+			shutdown = false`,
+			arg: "shutdown",
+			os:  "linux",
+		},
+		{
+			cfg: `[MetadataScripts]
+			startup = false`,
+			arg: "startup",
+			os:  "linux",
+		},
+		{
+			cfg: `[MetadataScripts]
+			shutdown-windows = false`,
+			arg: "shutdown",
+			os:  "windows",
+		},
+		{
+			cfg: `[MetadataScripts]
+			startup-windows = false`,
+			arg: "startup",
+			os:  "windows",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.os+"-"+test.arg, func(t *testing.T) {
+			if err := cfg.Load([]byte(test.cfg)); err != nil {
+				t.Errorf("cfg.Load(%s) failed unexpectedly with error: %v", test.cfg, err)
+			}
+			if _, err := getWantedKeys([]string{"", test.arg}, test.os); err == nil {
+				t.Errorf("getWantedKeys(%s, %s) succeeded for disabled config, want error", test.arg, test.os)
+			}
+		})
 	}
 }
