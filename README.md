@@ -15,6 +15,7 @@ on Windows and Linux GCE VMs in order to enable GCE platform features.
     * [Windows Failover Cluster Support](#windows-failover-cluster-support)
     * [Instance Setup](#instance-setup)
     * [Telemetry](#telemetry)
+    * [MTLS MDS](#mtls-mds)
 * [Metadata Scripts](#metadata-scripts)
 * [Configuration](#configuration)
 * [Packaging](#packaging)
@@ -43,6 +44,17 @@ functionality. Behaviors for each area of responsibility are detailed below.
 On Windows, the agent handles
 [creating user accounts and setting/resetting passwords.](https://cloud.google.com/compute/docs/instances/windows/creating-passwords-for-windows-instances)
 
+Guest Agent automatically creates local user accounts for any SSH user defined
+in the Metadata SSH keys at the instance or project level (unless blocked) 
+on Windows instances to support [connecting to Windows VMs using SSH.](https://cloud.google.com/compute/docs/connect/windows-ssh)
+
+> Active Directory Domain Controller does not use the local user account database
+except when it is booted into the recovery console or demoted, so any account 
+created on the system would become an administrator of the Active Directory Domain.
+You can prevent unintended AD user provisioning by [disabling the account manager](https://cloud.google.com/compute/docs/instances/windows/creating-managing-windows-instances#disable_the_account_manager) on the AD controller VM.
+Refer [deploy domain controllers](https://cloud.google.com/architecture/deploy-an-active-directory-forest-on-compute-engine#deploy_domain_controllers) for more information
+on setting up AD on GCE.
+
 On Linux: If OS Login is not used, the guest agent will be responsible for
 provisioning and deprovisioning user accounts. The agent creates local user
 accounts and maintains the authorized SSH keys file for each. User account
@@ -58,9 +70,12 @@ The guest agent has the following behaviors:
     `google-sudoers` group.
 *   The daemon stores a file in the guest to record which user accounts are
     managed by Google.
-*   User accounts not managed by Google are not touched by the accounts daemon.
+*   User accounts not managed by the agent are not touched by the accounts daemon.
 *   The authorized keys file for a Google managed user is deleted when all SSH
     keys for the user are removed from metadata.
+*   Users accounts managed by the agent will be added to the `groups` config
+    line in the `Accounts` section. If these groups do not exist, the agent
+    will not create them.
 
 #### OS Login
 
@@ -79,6 +94,9 @@ otherwise called 'enabling' OS Login. This consists of:
 If the user disables OS login via metadata, the configuration changes will be
 removed.
 
+Note that options under the `Accounts` section of the configuration do not apply
+to oslogin users.
+
 #### Clock Skew
 
 (Linux only)
@@ -90,15 +108,74 @@ skew may result in `system time has changed` messages in VM logs.
 #### Network
 
 The guest agent uses network interface metadata to manage the network
-interfaces in the guest by performing the following tasks:
+interfaces by performing the following tasks:
 
-*   Enabled all associated network interfaces on boot.
+*   Enable all associated network interfaces on boot.
+    *   Detect the current active network manager service that is managing the
+        primary NIC.
+    *   Rollback and delete any guest agent-managed files/configurations left
+        behind by all other supported network manager services.
+    *   Write and apply new configurations for the secondary NICs using the
+        network manager service detected in the first step.
+    *   Create a route to the metadata server for the primary NIC only.
 *   Setup or remove IP routes in the guest for IP forwarding and IP aliases
     *   Only IPv4 IP addresses are currently supported.
     *   Routes are set on the primary ethernet interface.
     *   Google routes are configured, by default, with the routing protocol ID
         `66`. This ID is a namespace for daemon configured IP addresses. It can
         be changed with the config file, see below.
+
+On Linux, supported network managers are as follows. These are listed by
+descending priority and include the location at which the configuration files
+are written.
+
+*   `netplan`
+    *   Config location: `/run/netplan/`
+        *   ex: `/run/netplan/20-google-guest-agent-eth0.yaml`
+    *   Dropin location: `/etc/systemd/network/`
+        *   ex: `/etc/systemd/network/10-netplan-eth0.network.d/`
+*   `wicked`
+    *   Config location: `/etc/sysconfig/network/`
+        *   ex: `/etc/sysconfig/network/ifcfg-eth0`
+    *   Notes:
+        *   Existing `ifcfg` files are not overwritten and are skipped instead.
+*   `NetworkManager`
+    *   Config location: `/etc/NetworkManager/system-connections/`
+        *   ex:
+            `/etc/NetworkManager/system-connections/google-guest-agent-eth0.nmconnection`
+*   `systemd-networkd`
+    *   Config location: `/usr/lib/systemd/network/`
+        *   ex: `/usr/lib/systemd/network/20-eth0-google-guest-agent.network`
+*   `dhclient`
+    *   Config location: `/run/`
+        *   ex (pid):   `/run/dhclient.google-guest-agent.eth0.ipv4.pid`
+        *   ex (lease): `/run/dhclient.google-guest-agent.eth0.ipv4.lease`
+    *   Notes:
+        *   The primary NIC setup, if enabled, is skipped if a dhclient process
+            for the primary NIC is already running.
+
+If none of the first 4 network manager services are detected on the system, then
+the agent will default to using `dhclient` for managing network interfaces.
+
+Note: Ubuntu 18.04, while having `netplan` installed,  ships a outdated and 
+unsupported version of `networkctl`. This older version lacks essential commands like 
+`networkctl reload`, causing compatibility issues. Guest agent is designed to 
+fallback to dhclient on Ubuntu 18.04, even when netplan is present, to ensure proper
+network configuration.
+
+The following configuration flags can control the behavior:
+
+*   `manage_primary_nic`: When enabled, the agent will start managing the
+    primary NIC in addition to the secondary NICs.
+
+For more information about the instance configuration, see the Configuration
+section.
+
+The guest agent will also setup VLANs if VLAN is enabled. The setup and
+configuration for this work similarly to the normal NIC configuration.
+
+If the VLANs' parent interface is the primary NIC, it will apply the VLAN
+configurations regardless of whether `manage_primary_nic` is set.
 
 #### Windows Failover Cluster Support
 
@@ -146,6 +223,64 @@ then once every 24 hours.
 Telemetry can be disabled by setting the metadata key `disable-guest-telemetry`
 to `true`.
 
+#### MTLS MDS
+
+GCE [Shielded VMs](https://cloud.google.com/compute/shielded-vm/docs/shielded-vm)
+now support HTTPS endpoint `https://metadata.google.internal/computeMetadata/v1`
+for Metadata Server. To enable communication with secure HTTPS endpoint, Guest Agent 
+retrieves and stores credentials on the VM's disk in a standard location, making them 
+accessible to any client application running on the VM. Both the root certificate 
+and client credentials are updated each time the guest-agent process starts. 
+For enhanced security, client credentials are automatically refreshed every 48 hours.
+The agent generates and saves new credentials, while the old ones remain valid. 
+This overlap period ensures that clients have sufficient time to transition
+to the new credentials before the old ones expire, and it allows the agent to retry in case
+of failure and obtain valid credentials before the existing ones become invalid. Client 
+credentials are basically EC private key and the client certificate concatenated. These 
+credentials are unique to an instance and would not work elsewhere.
+
+Refer [this](https://cloud.google.com/compute/docs/metadata/overview#https-mds) 
+for more information on HTTPS metadata server endpoint and credential details 
+including their lifespan.
+
+Credentials can be stored at these supported locations - 
+
+* Linux: 
+
+    - Client credentials: `/run/google-mds-mtls/client.key`
+    - Root certificate: `/run/google-mds-mtls/root.crt` and local trust store based on 
+    target OS. Refer [this](https://cloud.google.com/compute/docs/metadata/overview#https-mds-certificates) 
+    for local trust store location for each target OS.
+
+* Windows:
+
+    - Client credentials: `C:\ProgramData\Google\ComputeEngine\mds-mtls-client.key` and 
+    `Cert:\LocalMachine\My`
+    - Root certificate: `C:\ProgramData\Google\ComputeEngine\mds-mtls-root.crt` and 
+    `Cert:\LocalMachine\Root`
+    - [PFX](https://learn.microsoft.com/en-us/windows-hardware/drivers/install/personal-information-exchange---pfx--files): `C:\ProgramData\Google\Compute Engine\mds-mtls-client.key.pfx`
+
+    *Credentials can be stored on disk as well as in [Certificate Store](https://learn.microsoft.com/en-us/windows-hardware/drivers/install/certificate-stores) on Windows*
+
+Note that this is disabled by default, if HTTPS endpoint is supported on a VM, the feature
+can be enabled by setting `disable-https-mds-setup = false` under `[MDS]` section
+in `instance_configs.cfg` file. 
+
+If enabled, agent will write certificates only on disk by default and users can
+opt-in to have certificates in OS Native stores. This means in case of Linux based VMs
+MDS Root certificate will be added to trust store like 
+`/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem` on RHEL based systems 
+and `/etc/ssl/certs/ca-certificates.crt` on Debian based. Local root trust store 
+is updated by running `update-ca-certificates` or `update-ca-trust` tool based on the OS.
+On Windows, Client credentials will be added in `Cert:\LocalMachine\My` and Root
+certificate in `Cert:\LocalMachine\Root`. This can be enabled by setting `enable-https-mds-native-cert-store = true` under same `[MDS]` section.
+
+> As documented by Microsoft [here](https://learn.microsoft.com/en-us/troubleshoot/windows-server/active-directory/enable-ldap-over-ssl-3rd-certification-authority#possible-issues) there
+could be issues with LDAPS process when multiple certificates are added in personal
+store. Avoid enabling OS Native stores on Domain Controllers. Credentials can still
+be used from disk if required.
+
+
 ## Metadata Scripts
 
 Metadata scripts implement support for running user provided
@@ -183,13 +318,14 @@ The following are valid user configuration options.
 Section           | Option                 | Value
 ----------------- | ---------------------- | -----
 Accounts          | deprovision\_remove    | `true` makes deprovisioning a user destructive.
-Accounts          | groups                 | Comma separated list of groups for newly provisioned users.
+Accounts          | groups                 | Comma separated list of groups for newly provisioned users created from metadata ssh keys.
 Accounts          | useradd\_cmd           | Command string to create a new user.
 Accounts          | userdel\_cmd           | Command string to delete a user.
 Accounts          | usermod\_cmd           | Command string to modify a user's groups.
 Accounts          | gpasswd\_add\_cmd      | Command string to add a user to a group.
 Accounts          | gpasswd\_remove\_cmd   | Command string to remove a user from a group.
 Accounts          | groupadd\_cmd          | Command string to create a new group.
+Core              | cloud\_logging\_enabled| `false` disable cloud logging.
 Daemons           | accounts\_daemon       | `false` disables the accounts daemon.
 Daemons           | clock\_skew\_daemon    | `false` disables the clock skew daemon.
 Daemons           | network\_daemon        | `false` disables the network daemon.
@@ -208,7 +344,9 @@ MetadataScripts   | startup                | `false` disables startup script exe
 MetadataScripts   | shutdown               | `false` disables shutdown script execution.
 NetworkInterfaces | setup                  | `false` skips network interface setup.
 NetworkInterfaces | ip\_forwarding         | `false` skips IP forwarding.
+NetworkInterfaces | manage\_primary\_nic   | `true` will start managing the primary NIC in addition to the secondary NICs.
 NetworkInterfaces | dhcp\_command          | String path for alternate dhcp executable used to enable network interfaces.
+NetworkInterfaces | restore_debian12_netplan_config | `true` will create the debian-12's default netplan  configuration. It's set `true` by default.
 OSLogin           | cert_authentication    | `false` prevents guest-agent from setting up sshd's `TrustedUserCAKeys`, `AuthorizedPrincipalsCommand` and `AuthorizedPrincipalsCommandUser` configuration keys. Default value: `true`.
 
 Setting `network_enabled` to `false` will disable generating host keys and the

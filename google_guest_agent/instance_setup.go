@@ -27,8 +27,9 @@ import (
 
 	"github.com/GoogleCloudPlatform/guest-agent/google_guest_agent/agentcrypto"
 	"github.com/GoogleCloudPlatform/guest-agent/google_guest_agent/cfg"
+	network "github.com/GoogleCloudPlatform/guest-agent/google_guest_agent/network/manager"
 	"github.com/GoogleCloudPlatform/guest-agent/google_guest_agent/run"
-	"github.com/GoogleCloudPlatform/guest-agent/google_guest_agent/scheduler"
+	"github.com/GoogleCloudPlatform/guest-agent/retry"
 	"github.com/GoogleCloudPlatform/guest-logging-go/logger"
 	"github.com/go-ini/ini"
 )
@@ -36,13 +37,15 @@ import (
 func getDefaultAdapter(fes []ipForwardEntry) (*ipForwardEntry, error) {
 	// Choose the first adapter index that has the default route setup.
 	// This is equivalent to how route.exe works when interface is not provided.
+	defaultRoute := net.ParseIP("0.0.0.0")
 	sort.Slice(fes, func(i, j int) bool { return fes[i].ipForwardIfIndex < fes[j].ipForwardIfIndex })
 	for _, fe := range fes {
-		if fe.ipForwardDest.Equal(net.ParseIP("0.0.0.0")) {
+		if fe.ipForwardDest.Equal(defaultRoute) {
 			return &fe, nil
 		}
 	}
-	return nil, fmt.Errorf("could not find default route")
+
+	return nil, fmt.Errorf("no default route to %s found in %+v forward entries", defaultRoute.String(), fes)
 }
 
 func addMetadataRoute() error {
@@ -94,13 +97,11 @@ func agentInit(ctx context.Context) {
 	config := cfg.Get()
 
 	if runtime.GOOS == "windows" {
-		// Indefinitely retry to set up required MDS route.
-		for ; ; time.Sleep(1 * time.Second) {
-			if err := addMetadataRoute(); err != nil {
-				logger.Errorf("Could not set default route to metadata: %v", err)
-			} else {
-				break
-			}
+		// Try maximum for 1 min.
+		policy := retry.Policy{MaxAttempts: 60, BackoffFactor: 1, Jitter: time.Second}
+		err := retry.Run(ctx, policy, addMetadataRoute)
+		if err != nil {
+			panic(fmt.Sprintf("Failed to set metadata route: %+v", err))
 		}
 	} else {
 		// Linux instance setup.
@@ -156,9 +157,22 @@ func agentInit(ctx context.Context) {
 			newMetadata, err = mdsClient.Get(ctx)
 			if err != nil {
 				logger.Errorf("Failed to reach MDS(all retries exhausted): %+v", err)
-				os.Exit(1)
+				logger.Infof("Falling to OS default network configuration to attempt to recover.")
+				if err := network.FallbackToDefault(ctx); err != nil {
+					// Just log error and attempt to continue anyway, if we can't reach MDS
+					// we can't do anything.
+					logger.Errorf("Failed to rollback guest-agent network configuration: %v", err)
+				}
+				newMetadata, err = mdsClient.Get(ctx)
+				if err != nil {
+					logger.Errorf("Failed to reach MDS after attempt to recover network configuration(all retries exhausted): %+v", err)
+					os.Exit(1)
+				}
 			}
 		}
+
+		// Early setup the network configurations before we notify systemd we are done.
+		runManager(ctx, addressManager)
 
 		// Disable overcommit accounting; e2 instances only.
 		parts := strings.Split(newMetadata.Instance.MachineType, "/")
@@ -212,9 +226,7 @@ func agentInit(ctx context.Context) {
 	// use them. Processes may depend on the Guest Agent at startup to ensure that the credentials are
 	// available for use. By generating the credentials before notifying the systemd, we ensure that
 	// they are generated for any process that depends on the Guest Agent.
-	if config.MDS.MTLSBootstrappingEnabled {
-		scheduler.ScheduleJobs(ctx, []scheduler.Job{agentcrypto.New()}, true)
-	}
+	agentcrypto.Init(ctx)
 }
 
 func generateSSHKeys(ctx context.Context) error {

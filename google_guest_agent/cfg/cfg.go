@@ -41,6 +41,9 @@ const (
 	unixConfigPath = `/etc/default/instance_configs.cfg`
 
 	defaultConfig = `
+[Core]
+cloud_logging_enabled = true
+
 [Accounts]
 deprovision_remove = false
 gpasswd_add_cmd = gpasswd -a {user} {group}
@@ -87,12 +90,15 @@ sysprep-specialize = true
 dhcp_command =
 ip_forwarding = true
 setup = true
+manage_primary_nic =
+restore_debian12_netplan_config = true
 
 [OSLogin]
 cert_authentication = true
 
 [MDS]
-mtls_bootstrapping_enabled = true
+disable-https-mds-setup = true
+enable-https-mds-native-cert-store = false
 
 [Snapshots]
 enabled = false
@@ -105,11 +111,23 @@ command_monitor_enabled = false
 command_pipe_mode = 0770
 command_pipe_group =
 command_request_timeout = 10s
+vlan_setup_enabled = false
+systemd_config_dir = /usr/lib/systemd/network
 `
 )
 
+// Core contains the core configuration entries of guest agent, all
+// configurations not tied/specific to a subsystem are defined in here.
+type Core struct {
+	// CloudLoggingEnabled config toggle controls Guest Agent cloud logger.
+	// Disabling it will stop Guest Agent for configuring and logging to Cloud Logging.
+	CloudLoggingEnabled bool `ini:"cloud_logging_enabled,omitempty"`
+}
+
 // Sections encapsulates all the configuration sections.
 type Sections struct {
+	// Core defines the core guest-agent's configuration entries/keys.
+	Core *Core `ini:"Core,omitempty"`
 	// AccountManager defines the address management configurations. It takes precedence over instance's
 	// and project's metadata configuration. The default configuration doesn't define values to it, if the
 	// user has defined it then we shouldn't even consider metadata values. Users must check if this
@@ -250,17 +268,26 @@ type OSLogin struct {
 	CertAuthentication bool `ini:"cert_authentication,omitempty"`
 }
 
-// MDS contains the configurations for MDS section.
+// MDS contains the configurations for MDS section. Currently its opt-in only
+// and should not assume any defaults. Setting any [defaultConfig] values will
+// override user settings from Metadata.
 type MDS struct {
-	// MTLSBootstrappingEnabled enables/disables the mTLS credential refresher.
-	MTLSBootstrappingEnabled bool `ini:"mtls_bootstrapping_enabled,omitempty"`
+	// DisableHTTPSMdsSetup enables/disables the mTLS credential refresher.
+	DisableHTTPSMdsSetup bool `ini:"disable-https-mds-setup,omitempty"`
+	// HTTPSMDSEnableNativeStore enables/disables the use of OSs native store. Native
+	// store is Certificate Store on Windows which hosts both Client Credential and
+	// Root certificate where as its trust store that hosts root certs like
+	// `/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem` on Linux.
+	HTTPSMDSEnableNativeStore bool `ini:"enable-https-mds-native-cert-store,omitempty"`
 }
 
 // NetworkInterfaces contains the configurations of NetworkInterfaces section.
 type NetworkInterfaces struct {
-	DHCPCommand  string `ini:"dhcp_command,omitempty"`
-	IPForwarding bool   `ini:"ip_forwarding,omitempty"`
-	Setup        bool   `ini:"setup,omitempty"`
+	DHCPCommand                  string `ini:"dhcp_command,omitempty"`
+	IPForwarding                 bool   `ini:"ip_forwarding,omitempty"`
+	Setup                        bool   `ini:"setup,omitempty"`
+	ManagePrimaryNIC             bool   `ini:"manage_primary_nic,omitempty"`
+	RestoreDebian12NetplanConfig bool   `ini:"restore_debian12_netplan_config,omitempty"`
 }
 
 // Snapshots contains the configurations of Snapshots section.
@@ -280,6 +307,8 @@ type Unstable struct {
 	CommandRequestTimeout string `ini:"command_request_timeout,omitempty"`
 	CommandPipeMode       string `ini:"command_pipe_mode,omitempty"`
 	CommandPipeGroup      string `ini:"command_pipe_group,omitempty"`
+	VlanSetupEnabled      bool   `ini:"vlan_setup_enabled,omitempty"`
+	SystemdConfigDir      string `ini:"systemd_config_dir,omitempty"`
 }
 
 // WSFC contains the configurations of WSFC section.
