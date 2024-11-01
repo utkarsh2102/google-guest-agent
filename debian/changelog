@@ -1,7 +1,7 @@
 google-guest-agent (20241011.01-0ubuntu1) plucky; urgency=medium
 
   * New version for upstream tag 20241011.01. (LP: #2084498)
-    * Revendor golang dependencies
+     * Revendor golang dependencies.
 
  -- Chloé 'kajiya' Smith <chloe.smith@canonical.com>  Mon, 14 Oct 2024 20:46:56 +0100
 
