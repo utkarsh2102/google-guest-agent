@@ -1,3 +1,9 @@
+google-guest-agent (20241011.01-0ubuntu1~24.10.0) oracular; urgency=medium
+
+  * Rebuild for Oracular
+
+ -- Chloé 'kajiya' Smith <chloe.smith@canonical.com>  Thu, 14 Nov 2024 13:41:33 +0000
+
 google-guest-agent (20241011.01-0ubuntu1) plucky; urgency=medium
 
   * New version for upstream tag 20241011.01. (LP: #2084498)
